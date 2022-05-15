@@ -17,10 +17,10 @@ import threading
 from styleloss import *
 import time
 
-# policy = mixed_precision.Policy('mixed_float16')
-# mixed_precision.set_global_policy(policy)
-
+# uncomment this line to force CPU processing
 # tf.config.set_visible_devices([], 'GPU')
+
+# uncomment this line to enable automatic fp16 calculations on NVIDIA GPUs
 # os.environ["TF_ENABLE_AUTO_MIXED_PRECISION"] = "1"
 
 NUM_RESIDUAL_LAYERS = 5
@@ -56,13 +56,12 @@ class TextureGenerator(Model):
             layers.Conv2D(128, (3,3), strides=2, padding="valid"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU(),
-            #first latent layer is basically already in encoder... meh
             layers.Conv2D(256, (3,3), strides=1, padding="same"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU()
             ])
         self.residualLayers = []
-        for i in range(NUM_RESIDUAL_LAYERS - 1):
+        for i in range(NUM_RESIDUAL_LAYERS):
             newResidualLayer = tf.keras.Sequential([
             layers.Conv2D(256, (3,3), strides=1, padding="same"),
             tfa.layers.InstanceNormalization(),
@@ -70,25 +69,25 @@ class TextureGenerator(Model):
             ])
             self.residualLayers.append(newResidualLayer)
         self.albedoDecoder = tf.keras.Sequential([
+            layers.Conv2DTranspose(256, kernel_size=3, strides=2, padding="same"),
+            tfa.layers.InstanceNormalization(),
+            layers.ReLU(),
             layers.Conv2DTranspose(128, kernel_size=3, strides=2, padding="same"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU(),
-            layers.Conv2DTranspose(64, kernel_size=3, strides=2, padding="same"),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU(),
-            layers.Conv2DTranspose(32, kernel_size=7, strides=2, padding="same"),
+            layers.Conv2DTranspose(64, kernel_size=7, strides=2, padding="same"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU(),
             layers.Conv2D(3, (3,3), strides=1, padding="same", activation="sigmoid")
             ])
         self.normalDecoder = tf.keras.Sequential([
+            layers.Conv2DTranspose(256, kernel_size=3, strides=2, padding="same"),
+            tfa.layers.InstanceNormalization(),
+            layers.ReLU(),
             layers.Conv2DTranspose(128, kernel_size=3, strides=2, padding="same"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU(),
-            layers.Conv2DTranspose(64, kernel_size=3, strides=2, padding="same"),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU(),
-            layers.Conv2DTranspose(32, kernel_size=7, strides=2, padding="same"),
+            layers.Conv2DTranspose(64, kernel_size=7, strides=2, padding="same"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU(),
             layers.Conv2D(3, (3,3), strides=1, padding="same", activation="sigmoid")
@@ -296,12 +295,18 @@ def saveModels():
 
 testImage = loadTestImage(256)
 print("initialized!")
+sTime = time.time()
 createModels()
 tf.keras.backend.clear_session()
-train(0,30000,0.0002,IMAGE_WIDTH_TRAINING,500)
+train(0,15000,0.0002,IMAGE_WIDTH_TRAINING,500)
+saveModels()
+train(15000,30000,0.0002,IMAGE_WIDTH_TRAINING,500)
 saveModels()
 train(30000,40000,0.00004,IMAGE_WIDTH_TRAINING,500)
 saveModels()
-train(40000,50001,0.000008,IMAGE_WIDTH_TRAINING,500)
+train(40000,45000,0.00001,IMAGE_WIDTH_TRAINING,500)
 saveModels()
-saveTileableTextures(1024)
+train(45000,50001,0.000008,IMAGE_WIDTH_TRAINING,500)
+saveModels()
+tf.keras.backend.clear_session()
+print("finished training in %d minutes. Bye!" % int((time.time()-sTime)/60))
