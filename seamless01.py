@@ -26,6 +26,8 @@ import time
 NUM_RESIDUAL_LAYERS = 5
 IMAGE_WIDTH_TRAINING = 128
 IMAGE_WIDTH_TESTING = 256
+DISC_LEARNING_FACTOR = 1.0
+NUM_DECODER_CHUNKS = 16
 batchSize = 1
 files = os.listdir("images")
 baseImage = PIL.Image.open("images/albedo.png")
@@ -104,6 +106,36 @@ class TextureGenerator(Model):
         albedoResult = self.albedoDecoder(result[:,:,:,:3])
         normalResult = self.normalDecoder(result[:,:,:,3:6])
         return tf.concat([albedoResult,normalResult], axis=3)
+    def chunkedCall(self, x):
+        x = tf.pad(x, tf.constant([[0,0],[4, 4,], [4, 4],[0,0]]), "REFLECT")
+        result = self.encoder(x)
+        if self.tileLatentSpace:
+            result = np.tile(result,[1,2,2,1])
+        for residualLayer in self.residualLayers:
+            result = result + residualLayer(result)
+        
+        chunkSize = result.shape[1]//NUM_DECODER_CHUNKS
+        result = tf.pad(result, tf.constant([[0,0],[5, 5,], [5, 5],[0,0]]), "REFLECT")
+        finalResult = None
+        lineResult = None
+        for ix in range(NUM_DECODER_CHUNKS):
+            for iy in range(NUM_DECODER_CHUNKS):
+                chunk = result[:,ix*chunkSize:(ix+1)*chunkSize+10,iy*chunkSize:(iy+1)*chunkSize+10,:]
+                chunkResultAlbedo = self.albedoDecoder(chunk[:,:,:,:3])[:,40:-40,40:-40,:]
+                if finalResult == None and lineResult == None:
+                    print(chunk.shape)
+                    print(chunkResultAlbedo.shape)
+                chunkResultNormal = self.normalDecoder(chunk[:,:,:,3:6])[:,40:-40,40:-40,:]
+                if lineResult == None:
+                    lineResult = tf.concat([chunkResultAlbedo, chunkResultNormal], axis=3)
+                else:
+                    lineResult = tf.concat([lineResult, tf.concat([chunkResultAlbedo, chunkResultNormal], axis=3)], axis=2)
+            if finalResult == None:
+                finalResult = lineResult
+            else:
+                finalResult = tf.concat([finalResult, lineResult], axis=1)
+            lineResult = None
+        return finalResult
     
 class TextureDiscriminator(Model):
     def __init__(self):
@@ -236,7 +268,7 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
     global asyncBatchBufferCropped
     iterations = untilI - startI
     genOptimizer.learning_rate = learningRate
-    discOptimizer.learning_rate = learningRate
+    discOptimizer.learning_rate = learningRate * DISC_LEARNING_FACTOR
     
     threading.Thread(target=asyncLoadBatch, args=(files,batchSize,k,)).start()
     
@@ -263,7 +295,7 @@ def saveTileableTextures(k):
     
     genModel.tileLatentSpace = True
     genInput = loadTestImage(k)
-    genOutput = genModel(genInput, training=False)
+    genOutput = genModel.chunkedCall(genInput)
     
     albedoMap = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,:3].numpy() * 255.0).astype("uint8"))
     normalMap = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,3:6].numpy() * 255.0).astype("uint8"))
@@ -291,22 +323,39 @@ def saveModels():
     global discModel
     genModel.save_weights("gen/weights")
     discModel.save_weights("disc/weights")
+
+def stdLearning():
+    sTime = time.time()
+    createModels()
+    tf.keras.backend.clear_session()
+    train(0,15000,0.0002,IMAGE_WIDTH_TRAINING,500)
+    saveModels()
+    train(15000,30000,0.0002,IMAGE_WIDTH_TRAINING,500)
+    saveModels()
+    train(30000,40000,0.00004,IMAGE_WIDTH_TRAINING,500)
+    saveModels()
+    train(40000,45000,0.00001,IMAGE_WIDTH_TRAINING,500)
+    saveModels()
+    train(45000,50001,0.000008,IMAGE_WIDTH_TRAINING,500)
+    saveModels()
+    tf.keras.backend.clear_session()
+    saveTileableTextures(1024)
+    print("finished training in %d minutes. Bye!" % int((time.time()-sTime)/60))
     
+#experimental method for learning speedup evaluation
+def turboLearning():
+    sTime = time.time()
+    createModels()
+    tf.keras.backend.clear_session()
+    train(0,1000,0.00075,IMAGE_WIDTH_TRAINING,100)
+    train(1000,2000,0.000333,IMAGE_WIDTH_TRAINING,100)
+    train(2000,3000,0.0001,IMAGE_WIDTH_TRAINING,100)
+    train(3000,4000,0.00001,IMAGE_WIDTH_TRAINING,100)
+    train(4000,5000,0.000008,IMAGE_WIDTH_TRAINING,100)
+    saveModels()
+    tf.keras.backend.clear_session()
+    saveTileableTextures(1024)
+    print("finished turbo training in %d minutes. Bye!" % int((time.time()-sTime)/60))
 
 testImage = loadTestImage(256)
 print("initialized!")
-sTime = time.time()
-createModels()
-tf.keras.backend.clear_session()
-train(0,15000,0.0002,IMAGE_WIDTH_TRAINING,500)
-saveModels()
-train(15000,30000,0.0002,IMAGE_WIDTH_TRAINING,500)
-saveModels()
-train(30000,40000,0.00004,IMAGE_WIDTH_TRAINING,500)
-saveModels()
-train(40000,45000,0.00001,IMAGE_WIDTH_TRAINING,500)
-saveModels()
-train(45000,50001,0.000008,IMAGE_WIDTH_TRAINING,500)
-saveModels()
-tf.keras.backend.clear_session()
-print("finished training in %d minutes. Bye!" % int((time.time()-sTime)/60))
