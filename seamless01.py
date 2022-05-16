@@ -9,6 +9,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras import mixed_precision
 
 import os
+import shutil
 import random
 import PIL
 import PIL.Image
@@ -23,22 +24,18 @@ import time
 # uncomment this line to enable automatic fp16 calculations on NVIDIA GPUs
 # os.environ["TF_ENABLE_AUTO_MIXED_PRECISION"] = "1"
 
-NUM_RESIDUAL_LAYERS = 5
+USE_L1 = True
+USE_LADV = True
+USE_LSTYLE = True
+
+USE_PATCH_L1 = False
+
+NUM_RESIDUAL_BLOCKS = 5
 IMAGE_WIDTH_TRAINING = 128
 IMAGE_WIDTH_TESTING = 256
 DISC_LEARNING_FACTOR = 1.0
 NUM_DECODER_CHUNKS = 16
 batchSize = 1
-files = os.listdir("images")
-baseImage = PIL.Image.open("images/albedo.png")
-normalBaseImage = PIL.Image.open("images/normal.png")
-baseImage = tf.image.crop_to_bounding_box(baseImage, 0,0, baseImage.getbbox()[2], baseImage.getbbox()[3])
-normalBaseImage = tf.image.crop_to_bounding_box(normalBaseImage, 0,0, normalBaseImage.getbbox()[2], normalBaseImage.getbbox()[3])
-#remove alpha channels and concatenate
-baseImage = baseImage[:,:,:3]
-normalBaseImage = normalBaseImage[:,:,:3]
-baseImage = tf.concat([baseImage, normalBaseImage], axis=2)
-normalBaseImage = None
 
 genModel = None
 discModel = None
@@ -62,14 +59,14 @@ class TextureGenerator(Model):
             tfa.layers.InstanceNormalization(),
             layers.ReLU()
             ])
-        self.residualLayers = []
-        for i in range(NUM_RESIDUAL_LAYERS):
-            newResidualLayer = tf.keras.Sequential([
+        self.residualBlocks = []
+        for i in range(NUM_RESIDUAL_BLOCKS):
+            newResidualBlock = tf.keras.Sequential([
             layers.Conv2D(256, (3,3), strides=1, padding="same"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU()
             ])
-            self.residualLayers.append(newResidualLayer)
+            self.residualBlocks.append(newResidualBlock)
         self.albedoDecoder = tf.keras.Sequential([
             layers.Conv2DTranspose(256, kernel_size=3, strides=2, padding="same"),
             tfa.layers.InstanceNormalization(),
@@ -101,8 +98,8 @@ class TextureGenerator(Model):
         result = self.encoder(x)
         if self.tileLatentSpace:
             result = np.tile(result,[1,2,2,1])
-        for residualLayer in self.residualLayers:
-            result = result + residualLayer(result)
+        for residualBlock in self.residualBlocks:
+            result = result + residualBlock(result)
         albedoResult = self.albedoDecoder(result[:,:,:,:3])
         normalResult = self.normalDecoder(result[:,:,:,3:6])
         return tf.concat([albedoResult,normalResult], axis=3)
@@ -111,8 +108,8 @@ class TextureGenerator(Model):
         result = self.encoder(x)
         if self.tileLatentSpace:
             result = np.tile(result,[1,2,2,1])
-        for residualLayer in self.residualLayers:
-            result = result + residualLayer(result)
+        for residualBlock in self.residualBlocks:
+            result = result + residualBlock(result)
         
         chunkSize = result.shape[1]//NUM_DECODER_CHUNKS
         result = tf.pad(result, tf.constant([[0,0],[5, 5,], [5, 5],[0,0]]), "REFLECT")
@@ -122,9 +119,9 @@ class TextureGenerator(Model):
             for iy in range(NUM_DECODER_CHUNKS):
                 chunk = result[:,ix*chunkSize:(ix+1)*chunkSize+10,iy*chunkSize:(iy+1)*chunkSize+10,:]
                 chunkResultAlbedo = self.albedoDecoder(chunk[:,:,:,:3])[:,40:-40,40:-40,:]
-                if finalResult == None and lineResult == None:
-                    print(chunk.shape)
-                    print(chunkResultAlbedo.shape)
+#                 if finalResult == None and lineResult == None:
+#                     print(chunk.shape)
+#                     print(chunkResultAlbedo.shape)
                 chunkResultNormal = self.normalDecoder(chunk[:,:,:,3:6])[:,40:-40,40:-40,:]
                 if lineResult == None:
                     lineResult = tf.concat([chunkResultAlbedo, chunkResultNormal], axis=3)
@@ -164,20 +161,51 @@ def discriminatorLoss(realOutput, fakeOutput):
     realLoss = losses.BinaryCrossentropy(from_logits=False)(tf.ones_like(realOutput), realOutput)
     fakeLoss = losses.BinaryCrossentropy(from_logits=False)(tf.zeros_like(fakeOutput), fakeOutput)
     return realLoss + fakeLoss;
+
+def patchL1(in1, in2):
+    outSize = in1.shape[1]//4
+    diff = tf.abs(in1-in2)
+    outTensor = None
+    outTensorLine = []
+    for iy in range(outSize):
+        for ix in range(outSize):
+            outTensorLine.append(tf.reduce_mean(diff[:,ix*4:(ix+1)*4, iy*4:(iy+1)*4,:]))
+        if outTensor == None:
+            outTensor = tf.expand_dims(outTensorLine, axis=1)
+        else:
+            outTensor = tf.concat([outTensor, tf.expand_dims(tf.stack(outTensorLine), axis=1)], axis=1)
+        outTensorLine = []
+        
+    return tf.expand_dims(tf.expand_dims(outTensor, 0), 3)
         
 def generatorLoss(fakeOutput, realImages, fakeImages):
-    dissLoss = losses.BinaryCrossentropy(from_logits=False)(tf.ones_like(fakeOutput), fakeOutput)
-    L1A = losses.MeanAbsoluteError()(realImages[:,:,:,:3], fakeImages[:,:,:,:3])
-    L1N = losses.MeanAbsoluteError()(realImages[:,:,:,3:6], fakeImages[:,:,:,3:6])
-    styleLoss = calculateStyleLoss(styleModel, realImages[:,:,:,:3], fakeImages[:,:,:,:3])
+    if USE_LADV:
+        discLoss = losses.BinaryCrossentropy(from_logits=False)(tf.ones_like(fakeOutput), fakeOutput)
+    else:
+        discLoss = 0
+    if USE_L1:
+        if USE_PATCH_L1:
+            L1A = patchL1(realImages[:,:,:,:3], fakeImages[:,:,:,:3])
+            L1N = patchL1(realImages[:,:,:,3:6], fakeImages[:,:,:,3:6])
+        else:
+            L1A = losses.MeanAbsoluteError()(realImages[:,:,:,:3], fakeImages[:,:,:,:3])
+            L1N = losses.MeanAbsoluteError()(realImages[:,:,:,3:6], fakeImages[:,:,:,3:6])
+    else:
+        L1A = 0
+        L1N = 0
+    if USE_LSTYLE:
+        styleLoss = calculateStyleLoss(styleModel, realImages[:,:,:,:3], fakeImages[:,:,:,:3])
+    else:
+        styleLoss = 0
     #print("%f   -   %f   -   %f" % (dissLoss, likenessLoss, styleLoss))
-    return dissLoss + (10.0 * (L1A+L1N)) + styleLoss
+    return discLoss + (10.0 * (L1A+L1N)) + styleLoss
         
 genOptimizer = optimizers.Adam(0.0002)
 discOptimizer = optimizers.Adam(0.0002)
 
 @tf.function
 def trainStep(realImages, croppedImages):
+    
     with tf.GradientTape() as genTape, tf.GradientTape() as discTape:
         fakeImages = genModel(croppedImages, training=True)
         
@@ -195,6 +223,9 @@ def trainStep(realImages, croppedImages):
 
 
 def buildBatch(files, batchSize, maxImageWidth):
+    global baseImage
+    if baseImage == None:
+        loadBaseImage()
     images = []
     #randomFiles = random.choices(files, k=batchSize)
     #for file in randomFiles:
@@ -221,6 +252,9 @@ def buildBatch(files, batchSize, maxImageWidth):
     return baseImages, croppedImages
 
 def loadTestImage(k):
+    global baseImage
+    if baseImage == None:
+        loadBaseImage()
     images = []
     posX = (baseImage.shape[0] - k)//2
     posY = (baseImage.shape[1] - k)//2
@@ -251,7 +285,7 @@ def saveTestImage(index):
     outputImage.paste(pilDisImage, (IMAGE_WIDTH_TESTING * 2, IMAGE_WIDTH_TESTING))
     outputImage.paste(pilDisImage2, (IMAGE_WIDTH_TESTING * 2, IMAGE_WIDTH_TESTING+IMAGE_WIDTH_TESTING//2))
     
-    outputImage.save("results/"+str(index)+".jpg")
+    outputImage.save(currentProjectPath+str(index)+".jpg")
 
 def asyncLoadBatch(files, batchSize, k):
     global batchSem
@@ -300,29 +334,90 @@ def saveTileableTextures(k):
     albedoMap = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,:3].numpy() * 255.0).astype("uint8"))
     normalMap = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,3:6].numpy() * 255.0).astype("uint8"))
     
-    albedoMap.save("results/albedo.png")
-    normalMap.save("results/normal.png")
+    albedoMap.save(currentProjectPath+"albedo.png")
+    normalMap.save(currentProjectPath+"normal.png")
     
     genModel.tileLatentSpace = False
-            
+
+def saveGeneratorWeights(path):
+    global genModel
+    global discModel
+    
+    genModel.encoder.save_weights(path+"gen/enc")
+    for i, resBlock in enumerate(genModel.residualBlocks):
+        resBlock.save_weights(path+"gen/res"+str(i))
+    genModel.albedoDecoder.save_weights(path+"gen/adec")
+    genModel.normalDecoder.save_weights(path+"gen/ndec")
+
+def saveDiscriminatorWeights(path):
+    discModel.model.save_weights(path+"disc/weights")
+    
+def loadWeights(path):
+    global genModel
+    global discModel
+    
+    genModel.encoder.load_weights(path+"gen/enc")
+    for i, resBlock in enumerate(genModel.residualBlocks):
+        resBlock.load_weights(path+"gen/res"+str(i))
+    genModel.albedoDecoder.load_weights(path+"gen/adec")
+    genModel.normalDecoder.load_weights(path+"gen/ndec")
+    
+    discModel.model.load_weights(path+"disc/weights")
+
 def createModels():
     global genModel
     global discModel
-    genModel = TextureGenerator()
-    discModel = TextureDiscriminator()
-
+    if genModel == None:
+        genModel = TextureGenerator()
+        genModel(tf.fill([1,32,32,6],0.0))
+        saveGeneratorWeights("")
+    if discModel == None:
+        discModel = TextureDiscriminator()
+        saveDiscriminatorWeights("")
+    loadWeights("")
+    
 def loadModels():
     global genModel
     global discModel
     createModels()
-    genModel.load_weights("gen/weights")
-    discModel.load_weights("disc/weights")
+    loadWeights(currentProjectPath)
     
 def saveModels():
     global genModel
     global discModel
-    genModel.save_weights("gen/weights")
-    discModel.save_weights("disc/weights")
+    saveGeneratorWeights(currentProjectPath)
+    saveDiscriminatorWeights(currentProjectPath)
+    
+def setProject(projectName):
+    global baseImage
+    global currentProjectPath
+    baseImage = None
+    oldProjectPath = currentProjectPath
+    currentProjectPath = "projects/"+projectName+"/"
+    try:
+        os.mkdir(currentProjectPath)
+    except:
+        pass
+    try:
+        os.mkdir(currentProjectPath+"images")
+        shutil.copyfile(oldProjectPath + "images/albedo.png", currentProjectPath + "images/albedo.png")
+        shutil.copyfile(oldProjectPath + "images/normal.png", currentProjectPath + "images/normal.png")
+    except:
+        pass
+
+def loadBaseImage():
+    global baseImage
+    #load project input images
+    baseImage = PIL.Image.open(currentProjectPath+"images/albedo.png")
+    normalBaseImage = PIL.Image.open(currentProjectPath+"images/normal.png")
+
+    baseImage = tf.image.crop_to_bounding_box(baseImage, 0,0, baseImage.getbbox()[2], baseImage.getbbox()[3])
+    normalBaseImage = tf.image.crop_to_bounding_box(normalBaseImage, 0,0, normalBaseImage.getbbox()[2], normalBaseImage.getbbox()[3])
+    #remove alpha channels and concatenate
+    baseImage = baseImage[:,:,:3]
+    normalBaseImage = normalBaseImage[:,:,:3]
+    baseImage = tf.concat([baseImage, normalBaseImage], axis=2)
+    normalBaseImage = None
 
 def stdLearning():
     sTime = time.time()
@@ -357,5 +452,32 @@ def turboLearning():
     saveTileableTextures(1024)
     print("finished turbo training in %d minutes. Bye!" % int((time.time()-sTime)/60))
 
+def ablationTest():
+    setProject("l1")
+    createModels()
+    USE_L1 = True
+    USE_LADV = False
+    USE_LSTYLE = False
+    train(0,1001,0.0002,128,100)
+    saveModels()
+    setProject("lstyle")
+    createModels()
+    USE_L1 = False
+    USE_LADV = False
+    USE_LSTYLE = True
+    train(0,1001,0.0002,128,100)
+    saveModels()
+    setProject("ladv")
+    createModels()
+    USE_L1 = False
+    USE_LADV = True
+    USE_LSTYLE = False
+    train(0,1001,0.0002,128,100)
+    saveModels()
+
+currentProjectPath = "projects/default/"
+baseImage = loadBaseImage()
+files = os.listdir(currentProjectPath+"images")
+setProject("default")
 testImage = loadTestImage(256)
 print("initialized!")
