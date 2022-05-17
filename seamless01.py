@@ -30,6 +30,8 @@ USE_LSTYLE = True
 
 USE_PATCH_L1 = False
 
+SILENT = False
+
 NUM_RESIDUAL_BLOCKS = 5
 IMAGE_WIDTH_TRAINING = 128
 IMAGE_WIDTH_TESTING = 256
@@ -203,8 +205,8 @@ def generatorLoss(fakeOutput, realImages, fakeImages):
 genOptimizer = optimizers.Adam(0.0002)
 discOptimizer = optimizers.Adam(0.0002)
 
-@tf.function
 def trainStep(realImages, croppedImages):
+    print("trainStep(...) was retraced!")
     
     with tf.GradientTape() as genTape, tf.GradientTape() as discTape:
         fakeImages = genModel(croppedImages, training=True)
@@ -300,15 +302,21 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
     global batchSem
     global asyncBatchBuffer
     global asyncBatchBufferCropped
+    global SILENT
+    
     iterations = untilI - startI
     genOptimizer.learning_rate = learningRate
     discOptimizer.learning_rate = learningRate * DISC_LEARNING_FACTOR
+    
+    trainStepFunction = tf.function(trainStep)
     
     threading.Thread(target=asyncLoadBatch, args=(files,batchSize,k,)).start()
     
     startTime = time.time()
     
     for i in range(startI, startI+iterations):
+        if SILENT:
+            time.sleep(0.5)
         if i%100 == 0:
             if i-startI != 0:
                 elapsedTime = time.time() - startTime
@@ -321,7 +329,7 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
         croppedImages = tf.Variable(asyncBatchBufferCropped)
         threading.Thread(target=asyncLoadBatch, args=(files,batchSize,k,)).start()
         batchSem.release()
-        trainStep(baseImages, croppedImages)
+        trainStepFunction(baseImages, croppedImages)
         if i%imageEveryXBatches == 0:
             saveTestImage(i)
             
@@ -453,27 +461,34 @@ def turboLearning():
     print("finished turbo training in %d minutes. Bye!" % int((time.time()-sTime)/60))
 
 def ablationTest():
+    global USE_L1
+    global USE_LSTYLE
+    global USE_LADV
+    
     setProject("l1")
     createModels()
     USE_L1 = True
     USE_LADV = False
     USE_LSTYLE = False
-    train(0,1001,0.0002,128,100)
+    stdLearning()
     saveModels()
     setProject("lstyle")
     createModels()
     USE_L1 = False
     USE_LADV = False
     USE_LSTYLE = True
-    train(0,1001,0.0002,128,100)
+    stdLearning()
     saveModels()
     setProject("ladv")
     createModels()
     USE_L1 = False
     USE_LADV = True
     USE_LSTYLE = False
-    train(0,1001,0.0002,128,100)
+    stdLearning()
     saveModels()
+    USE_L1 = True
+    USE_LADV = True
+    USE_LSTYLE = True
 
 currentProjectPath = "projects/default/"
 baseImage = loadBaseImage()
