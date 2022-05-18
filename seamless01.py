@@ -57,7 +57,7 @@ class TextureGenerator(Model):
             layers.Conv2D(128, (3,3), strides=2, padding="valid"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU(),
-            layers.Conv2D(256, (3,3), strides=1, padding="same"),
+            layers.Conv2D(256, (3,3), strides=1, padding="valid"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU()
             ])
@@ -96,22 +96,22 @@ class TextureGenerator(Model):
         self.tileLatentSpace = False
         
     def call(self, x, training=False):
-        x = tf.pad(x, tf.constant([[0,0],[4, 4,], [4, 4],[0,0]]), "REFLECT")
+        x = tf.pad(x, tf.constant([[0,0],[8, 8,], [8, 8],[0,0]]), "REFLECT")
         result = self.encoder(x)
         if self.tileLatentSpace:
             result = np.tile(result,[1,2,2,1])
         for residualBlock in self.residualBlocks:
-            result = result + residualBlock(result)
+            result = result + residualBlock(result)#tf.pad(residualBlock(result), tf.constant([[0,0],[1,1],[1,1],[0,0]]))
         albedoResult = self.albedoDecoder(result[:,:,:,:3])
         normalResult = self.normalDecoder(result[:,:,:,3:6])
         return tf.concat([albedoResult,normalResult], axis=3)
     def chunkedCall(self, x):
-        x = tf.pad(x, tf.constant([[0,0],[4, 4,], [4, 4],[0,0]]), "REFLECT")
+        x = tf.pad(x, tf.constant([[0,0],[8, 8,], [8, 8],[0,0]]), "REFLECT")
         result = self.encoder(x)
         if self.tileLatentSpace:
             result = np.tile(result,[1,2,2,1])
         for residualBlock in self.residualBlocks:
-            result = result + residualBlock(result)
+            result = result + residualBlock(result)#tf.pad(residualBlock(result), tf.constant([[0,0],[1,1],[1,1],[0,0]]))
         
         chunkSize = result.shape[1]//NUM_DECODER_CHUNKS
         result = tf.pad(result, tf.constant([[0,0],[5, 5,], [5, 5],[0,0]]), "REFLECT")
@@ -333,17 +333,22 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
         if i%imageEveryXBatches == 0:
             saveTestImage(i)
             
-def saveTileableTextures(k):
+def saveTileableTextures(k, crop=True, filesuffix=""):
     
     genModel.tileLatentSpace = True
     genInput = loadTestImage(k)
     genOutput = genModel.chunkedCall(genInput)
     
-    albedoMap = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,:3].numpy() * 255.0).astype("uint8"))
-    normalMap = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,3:6].numpy() * 255.0).astype("uint8"))
+    if crop:
+        albedoMap = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,:3].numpy() * 255.0).astype("uint8"))
+        normalMap = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,3:6].numpy() * 255.0).astype("uint8"))
+    else:
+        albedoMap = PIL.Image.fromarray((genOutput[0,:,:,:3].numpy() * 255.0).astype("uint8"))
+        normalMap = PIL.Image.fromarray((genOutput[0,:,:,3:6].numpy() * 255.0).astype("uint8"))
+        
     
-    albedoMap.save(currentProjectPath+"albedo.png")
-    normalMap.save(currentProjectPath+"normal.png")
+    albedoMap.save(currentProjectPath+"albedo" + (("_" + filesuffix) if filesuffix else "") + ".png")
+    normalMap.save(currentProjectPath+"normal" + (("_" + filesuffix) if filesuffix else "") + ".png")
     
     genModel.tileLatentSpace = False
 
@@ -377,7 +382,7 @@ def createModels():
     global discModel
     if genModel == None:
         genModel = TextureGenerator()
-        genModel(tf.fill([1,32,32,6],0.0))
+        genModel(tf.fill([1,128,128,6],0.0))
         saveGeneratorWeights("")
     if discModel == None:
         discModel = TextureDiscriminator()
