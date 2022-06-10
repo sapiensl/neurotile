@@ -228,7 +228,7 @@ def buildBatch(files, batchSize, maxImageWidth):
     global baseImage
     if baseImage == None:
         loadBaseImage()
-    images = []
+    images = None
     #randomFiles = random.choices(files, k=batchSize)
     #for file in randomFiles:
     #    img = PIL.Image.open("images/"+file)
@@ -236,22 +236,21 @@ def buildBatch(files, batchSize, maxImageWidth):
         size = maxImageWidth
         posX = random.randrange(0, baseImage.shape[0]-size)
         posY = random.randrange(0, baseImage.shape[1]-size)
-        cropped = tf.image.crop_to_bounding_box(baseImage, posY, posX, size, size)
-        images.append(cropped)
-    
-    baseImages = tf.convert_to_tensor(images).numpy().astype("float32") / 255.
+        cropped = tf.cast(tf.image.crop_to_bounding_box(baseImage, posY, posX, size, size), dtype=tf.float32) / 255.
+        images = tf.expand_dims(cropped, axis=0) if images == None else tf.stack([images,cropped])
         
-    croppedImages = []
-    for i in baseImages:
+    croppedImages = None
+    for i in images:
         sx = i.shape[0]//2
         sy = i.shape[1]//2
         ox = sx // 2
         oy = sy // 2
-        croppedImages.append(tf.image.crop_to_bounding_box(i, ox,oy,sx,sy))
+        subCrop = tf.cast(tf.image.crop_to_bounding_box(i,ox,oy,sx,sy), dtype=tf.float32) / 255.
+        croppedImages = tf.expand_dims(subCrop, axis=0) if croppedImages == None else tf.stack([croppedImages,subCrop])
     
     croppedImages = tf.convert_to_tensor(croppedImages)
     
-    return baseImages, croppedImages
+    return images, croppedImages
 
 def loadTestImage(k):
     global baseImage
@@ -333,10 +332,14 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
         if i%imageEveryXBatches == 0:
             saveTestImage(i)
             
-def saveTileableTextures(k, crop=True, filesuffix=""):
+def saveTileableTextures(k, crop=True, filesuffix="", customInput=None):
     
     genModel.tileLatentSpace = True
-    genInput = loadTestImage(k)
+    if customInput != None:
+        genInput = customInput
+        k = customInput.shape[1]
+    else:
+        genInput = loadTestImage(k)
     genOutput = genModel.chunkedCall(genInput)
     
     if crop:
@@ -431,7 +434,10 @@ def loadBaseImage():
     normalBaseImage = normalBaseImage[:,:,:3]
     baseImage = tf.concat([baseImage, normalBaseImage], axis=2)
     normalBaseImage = None
-
+    
+def saveImage(inputData, filename):
+    PIL.Image.fromarray((inputData.numpy() * 255.0).astype("uint8")).save(currentProjectPath+filename+".png")
+    
 def stdLearning():
     sTime = time.time()
     createModels()
@@ -494,6 +500,30 @@ def ablationTest():
     USE_L1 = True
     USE_LADV = True
     USE_LSTYLE = True
+    
+def noiseExperiment(startK=16, iterations=5, makeFinalStack=True):
+    global currentProjectPath
+    originalPath = currentProjectPath
+    currentProjectPath += "fromnoise/"
+    os.mkdir(currentProjectPath)
+    inputNoise = tf.random.uniform(shape=(1,startK,startK,6), minval=0.0, maxval=1.0)
+    saveImage(inputNoise[0,:,:,:3], ("n%d" % startK))
+    output = None
+    iterK = startK
+    for i in range(iterations):
+        if i == 0:
+            output = genModel(inputNoise)
+        else:
+            if iterK > 200:
+                output = genModel.chunkedCall(output)
+            else:
+                output = genModel(output)
+        iterK *= 2
+        saveImage(output[0,:,:,:3], ("n%d" % iterK))
+    if makeFinalStack:
+        saveTileableTextures(0, True, "_fromnoise", output)
+    currentProjectPath = originalPath
+    
 
 currentProjectPath = "projects/default/"
 baseImage = loadBaseImage()
