@@ -102,8 +102,8 @@ class TextureGenerator(Model):
             result = np.tile(result,[1,2,2,1])
         for residualBlock in self.residualBlocks:
             result = result + residualBlock(result)#tf.pad(residualBlock(result), tf.constant([[0,0],[1,1],[1,1],[0,0]]))
-        albedoResult = self.albedoDecoder(result[:,:,:,:3])
-        normalResult = self.normalDecoder(result[:,:,:,3:6])
+        albedoResult = self.albedoDecoder(result)
+        normalResult = self.normalDecoder(result)
         return tf.concat([albedoResult,normalResult], axis=3)
     def chunkedCall(self, x):
         global NUM_DECODER_CHUNKS
@@ -121,11 +121,11 @@ class TextureGenerator(Model):
         for ix in range(NUM_DECODER_CHUNKS):
             for iy in range(NUM_DECODER_CHUNKS):
                 chunk = result[:,ix*chunkSize:(ix+1)*chunkSize+10,iy*chunkSize:(iy+1)*chunkSize+10,:]
-                chunkResultAlbedo = self.albedoDecoder(chunk[:,:,:,:3])[:,40:-40,40:-40,:]
+                chunkResultAlbedo = self.albedoDecoder(chunk)[:,40:-40,40:-40,:]
 #                 if finalResult == None and lineResult == None:
 #                     print(chunk.shape)
 #                     print(chunkResultAlbedo.shape)
-                chunkResultNormal = self.normalDecoder(chunk[:,:,:,3:6])[:,40:-40,40:-40,:]
+                chunkResultNormal = self.normalDecoder(chunk)[:,40:-40,40:-40,:]
                 if lineResult == None:
                     lineResult = tf.concat([chunkResultAlbedo, chunkResultNormal], axis=3)
                 else:
@@ -308,7 +308,8 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
     genOptimizer.learning_rate = learningRate
     discOptimizer.learning_rate = learningRate * DISC_LEARNING_FACTOR
     
-    trainStepFunction = tf.function(trainStep)
+    #TODO: this line has the number of channels baked into it
+    trainStepFunction = tf.function(trainStep, input_signature=(tf.TensorSpec(shape=[batchSize,k*2,k*2,6], dtype=tf.float32),tf.TensorSpec(shape=[batchSize,k,k,6], dtype=tf.float32),))
     
     threading.Thread(target=asyncLoadBatch, args=(files,batchSize,k,)).start()
     
