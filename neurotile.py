@@ -36,7 +36,7 @@ NUM_RESIDUAL_BLOCKS = 5
 IMAGE_WIDTH_TRAINING = 128
 IMAGE_WIDTH_TESTING = 256
 DISC_LEARNING_FACTOR = 1.0
-NUM_DECODER_CHUNKS = 16
+NUM_DECODER_CHUNKS = 8
 batchSize = 1
 
 genModel = None
@@ -106,6 +106,7 @@ class TextureGenerator(Model):
         normalResult = self.normalDecoder(result[:,:,:,3:6])
         return tf.concat([albedoResult,normalResult], axis=3)
     def chunkedCall(self, x):
+        global NUM_DECODER_CHUNKS
         x = tf.pad(x, tf.constant([[0,0],[8, 8,], [8, 8],[0,0]]), "REFLECT")
         result = self.encoder(x)
         if self.tileLatentSpace:
@@ -524,6 +525,26 @@ def noiseExperiment(startK=16, iterations=5, makeFinalStack=True):
         saveTileableTextures(0, True, "_fromnoise", output)
     currentProjectPath = originalPath
     
+def noiseSweep(k=256):
+    info = tf.Variable(loadTestImage(k))#TODO fix output of loadTestImage to correct type "TF Tensor"
+    global currentProjectPath
+    originalPath = currentProjectPath
+    currentProjectPath += "noisesweep/"
+    try:
+        os.mkdir(currentProjectPath)
+    except:
+        #I really dont care right now, this is experimental code executed by real professionals
+        pass
+
+    noise = tf.random.uniform(shape=(1,k,k,6), minval=0.05, maxval=0.95)
+    
+    for i in range(101):
+        infoFactor = 1 - (i/100)
+        noiseFactor = i/100
+        mix = infoFactor * info + noiseFactor * noise
+        saveImage(mix[0,:,:,:3], ("mix%d" % i))
+        saveTileableTextures(0, True, ("noise%dpercent" %i), mix)
+    currentProjectPath = originalPath
 
 currentProjectPath = "projects/default/"
 baseImage = loadBaseImage()
