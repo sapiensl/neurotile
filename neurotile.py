@@ -47,6 +47,10 @@ batchSem = threading.Semaphore()
 asyncBatchBuffer = None
 asyncBatchBufferCropped = None
 
+lastL1 = 0.0
+lastLStyle = 0.0
+lastLAdv = 0.0
+
 class TextureGenerator(Model):
     def __init__(self, numTextures=2):
         super(TextureGenerator, self).__init__()
@@ -175,26 +179,35 @@ def patchL1(in1, in2):
     return tf.expand_dims(tf.expand_dims(outTensor, 0), 3)
         
 def generatorLoss(fakeOutput, realImages, fakeImages):
+    global lastL1
+    global lastLAdv
+    global lastLStyle
+    
     if USE_LADV:
         discLoss = losses.BinaryCrossentropy(from_logits=False)(tf.ones_like(fakeOutput), fakeOutput)
+        lastLAdv = tf.math.reduce_sum(discLoss)
     else:
         discLoss = 0
+        lastAdv = 0.0
     if USE_L1:
         if USE_PATCH_L1:
-            L1A = patchL1(realImages[:,:,:,:3], fakeImages[:,:,:,:3])
-            L1N = patchL1(realImages[:,:,:,3:6], fakeImages[:,:,:,3:6])
+            L1 = patchL1(realImages, fakeImages)
+            lastL1 = tf.math.reduce_sum(L1)
         else:
-            L1A = losses.MeanAbsoluteError()(realImages[:,:,:,:3], fakeImages[:,:,:,:3])
-            L1N = losses.MeanAbsoluteError()(realImages[:,:,:,3:6], fakeImages[:,:,:,3:6])
+            L1 = losses.MeanAbsoluteError()(realImages[:,:,:,:3], fakeImages[:,:,:,:3])
+            lastL1 = L1
     else:
-        L1A = 0
-        L1N = 0
+        L1 = 0
+        lastL1 = 0.0
+    
+    styleLoss = 0
+    lastLStyle = 0.0
     if USE_LSTYLE:
-        styleLoss = calculateStyleLoss(styleModel, realImages[:,:,:,:3], fakeImages[:,:,:,:3])
-    else:
-        styleLoss = 0
+        for i in range(genModel.numTextures):
+            styleLoss += calculateStyleLoss(styleModel, realImages[:,:,:,i*3:(i+1)*3], fakeImages[:,:,:,i*3:(i+1)*3])
+        lastLStyle = styleLoss
     #print("%f   -   %f   -   %f" % (dissLoss, likenessLoss, styleLoss))
-    return discLoss + (10.0 * (L1A+L1N)) + styleLoss
+    return discLoss + (10.0 * L1) + styleLoss
         
 genOptimizer = optimizers.Adam(0.0002)
 discOptimizer = optimizers.Adam(0.0002)
@@ -285,6 +298,22 @@ def saveTestImage(index):
     outputImage.paste(pilDisImage2, (IMAGE_WIDTH_TESTING * 2, IMAGE_WIDTH_TESTING+IMAGE_WIDTH_TESTING//2))
     
     outputImage.save(currentProjectPath+str(index)+".jpg")
+    
+def clearLossLog():
+    with open(currentProjectPath + "losses.csv", "w") as lossCSV:
+        lossCSV.write("LAdv;L1;LStyle;\n")
+
+def logLossValues(): 
+    realImages, croppedImages = buildBatch(None, 1, IMAGE_WIDTH_TRAINING*2)
+    fakeImages = genModel(croppedImages, training=False)
+    fakeOutput = discModel(fakeImages, training=False)
+    generatorLoss(fakeOutput, realImages, fakeImages)
+    global lastLAdv
+    global lastL1
+    global lastLStyle
+    with open(currentProjectPath + "losses.csv", "a") as lossCSV:
+        lossCSV.write("%f;%f;%f;\n" % (lastLAdv, lastL1, lastLStyle))
+        print("LAdv: %f\tL1: %f\tLStyle: %f" % (lastLAdv, lastL1, lastLStyle))
 
 def asyncLoadBatch(files, batchSize, k):
     global batchSem
@@ -295,7 +324,7 @@ def asyncLoadBatch(files, batchSize, k):
     asyncBatchBuffer, asyncBatchBufferCropped = buildBatch(files, batchSize, k * 2)
     batchSem.release()
 
-def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEveryXBatches = 100):
+def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEveryXBatches = 100, lossStatsEveryXBatches=100):
     global batchSem
     global asyncBatchBuffer
     global asyncBatchBufferCropped
@@ -330,7 +359,9 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
         trainStepFunction(baseImages, croppedImages)
         if i%imageEveryXBatches == 0:
             saveTestImage(i)
-            
+        if i%lossStatsEveryXBatches == 0:
+            logLossValues()
+
 def saveTileableTextures(k, crop=True, filesuffix="", customInput=None):
     global genModel
     
@@ -391,13 +422,13 @@ def createModels():
     #baseImage does not have the leading axis yet, so the number of channels are stored in axis index 2
     numberOfTextures = baseImage.shape[2] // 3
     
-    if genModel == None:
-        genModel = TextureGenerator(numTextures=numberOfTextures)
-        genModel(tf.fill([1,128,128,genModel.numTextures*3],0.0))
-        saveGeneratorWeights("")
-    if discModel == None:
-        discModel = TextureDiscriminator(numTextures=numberOfTextures)
-        saveDiscriminatorWeights("")
+    #if genModel == None:
+    genModel = TextureGenerator(numTextures=numberOfTextures)
+    genModel(tf.fill([1,128,128,genModel.numTextures*3],0.0))
+        #saveGeneratorWeights("")
+    #if discModel == None:
+    discModel = TextureDiscriminator(numTextures=numberOfTextures)
+        #saveDiscriminatorWeights("")
     loadWeights("")
     
 def loadModels():
@@ -455,6 +486,7 @@ def saveImage(inputData, filename):
 def stdLearning():
     sTime = time.time()
     createModels()
+    clearLossLog()
     tf.keras.backend.clear_session()
     train(0,15000,0.0002,IMAGE_WIDTH_TRAINING,500)
     saveModels()
@@ -474,6 +506,7 @@ def stdLearning():
 def turboLearning():
     sTime = time.time()
     createModels()
+    clearLossLog()
     tf.keras.backend.clear_session()
     train(0,1000,0.00075,IMAGE_WIDTH_TRAINING,100)
     train(1000,2000,0.000333,IMAGE_WIDTH_TRAINING,100)
