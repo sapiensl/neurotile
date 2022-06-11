@@ -14,6 +14,8 @@ import random
 import PIL
 import PIL.Image
 import threading
+import csv
+import traceback
 
 from styleloss import *
 import time
@@ -303,17 +305,49 @@ def clearLossLog():
     with open(currentProjectPath + "losses.csv", "w") as lossCSV:
         lossCSV.write("LAdv;L1;LStyle;\n")
 
-def logLossValues(): 
+def logLossValues(i): 
     realImages, croppedImages = buildBatch(None, 1, IMAGE_WIDTH_TRAINING*2)
     fakeImages = genModel(croppedImages, training=False)
     fakeOutput = discModel(fakeImages, training=False)
-    generatorLoss(fakeOutput, realImages, fakeImages)
+    _ = generatorLoss(fakeOutput, realImages, fakeImages)
     global lastLAdv
     global lastL1
     global lastLStyle
     with open(currentProjectPath + "losses.csv", "a") as lossCSV:
-        lossCSV.write("%f;%f;%f;\n" % (lastLAdv, lastL1, lastLStyle))
-        print("LAdv: %f\tL1: %f\tLStyle: %f" % (lastLAdv, lastL1, lastLStyle))
+        lossCSV.write("%d;%f;%f;%f\n" % (i, lastLAdv, lastL1, lastLStyle))
+        print("i: %d\tLAdv: %f\tL1: %f\tLStyle: %f" % (i, lastLAdv, lastL1, lastLStyle))
+        
+def plotLosses():
+    iterations = []
+    LAdv = []
+    L1 = []
+    LStyle = []
+    
+    firstRow = True
+    try:
+        with open(currentProjectPath + "losses.csv", "r") as lossCSV:
+            lossReader = csv.reader(lossCSV, delimiter=";")
+            for i, row in enumerate(lossReader):
+                if firstRow:
+                    firstRow = False
+                    continue
+                iterations.append(float(row[0]))
+                LAdv.append(float(row[1]))
+                L1.append(float(row[2]))
+                LStyle.append(float(row[3]))
+                
+        figure, axis = plt.subplots(3)
+        axis[0].plot(iterations,LAdv)
+        axis[0].set_title("LAdv")
+        axis[1].plot(iterations,L1)
+        axis[1].set_title("L1")
+        axis[2].plot(iterations, LStyle)
+        axis[2].set_title("LStyle")
+          
+        plt.show()
+    except:
+        print(traceback.format_exc())
+        print("could not open losses.csv in this projects directory.")
 
 def asyncLoadBatch(files, batchSize, k):
     global batchSem
@@ -360,7 +394,7 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
         if i%imageEveryXBatches == 0:
             saveTestImage(i)
         if i%lossStatsEveryXBatches == 0:
-            logLossValues()
+            logLossValues(i)
 
 def saveTileableTextures(k, crop=True, filesuffix="", customInput=None):
     global genModel
@@ -429,7 +463,7 @@ def createModels():
     #if discModel == None:
     discModel = TextureDiscriminator(numTextures=numberOfTextures)
         #saveDiscriminatorWeights("")
-    loadWeights("")
+    #loadWeights("")
     
 def loadModels():
     global genModel
@@ -457,8 +491,8 @@ def setProject(projectName):
         pass
     try:
         os.mkdir(currentProjectPath+"images")
-        shutil.copyfile(oldProjectPath + "images/albedo.png", currentProjectPath + "images/albedo.png")
-        shutil.copyfile(oldProjectPath + "images/normal.png", currentProjectPath + "images/normal.png")
+        #shutil.copyfile(oldProjectPath + "images/albedo.png", currentProjectPath + "images/albedo.png")
+        #shutil.copyfile(oldProjectPath + "images/normal.png", currentProjectPath + "images/normal.png")
     except:
         pass
 
