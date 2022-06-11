@@ -48,10 +48,10 @@ asyncBatchBuffer = None
 asyncBatchBufferCropped = None
 
 class TextureGenerator(Model):
-    def __init__(self):
+    def __init__(self, numTextures=2):
         super(TextureGenerator, self).__init__()
         self.encoder = tf.keras.Sequential([
-            layers.Conv2D(64, (7,7), strides=2, padding="valid", input_shape=(None, None, 6)),
+            layers.Conv2D(64, (7,7), strides=2, padding="valid", input_shape=(None, None, numTextures*3)),
             tfa.layers.InstanceNormalization(),
             layers.ReLU(),
             layers.Conv2D(128, (3,3), strides=2, padding="valid"),
@@ -69,31 +69,23 @@ class TextureGenerator(Model):
             layers.ReLU()
             ])
             self.residualBlocks.append(newResidualBlock)
-        self.albedoDecoder = tf.keras.Sequential([
-            layers.Conv2DTranspose(256, kernel_size=3, strides=2, padding="same"),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU(),
-            layers.Conv2DTranspose(128, kernel_size=3, strides=2, padding="same"),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU(),
-            layers.Conv2DTranspose(64, kernel_size=7, strides=2, padding="same"),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU(),
-            layers.Conv2D(3, (3,3), strides=1, padding="same", activation="sigmoid")
-            ])
-        self.normalDecoder = tf.keras.Sequential([
-            layers.Conv2DTranspose(256, kernel_size=3, strides=2, padding="same"),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU(),
-            layers.Conv2DTranspose(128, kernel_size=3, strides=2, padding="same"),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU(),
-            layers.Conv2DTranspose(64, kernel_size=7, strides=2, padding="same"),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU(),
-            layers.Conv2D(3, (3,3), strides=1, padding="same", activation="sigmoid")
-            ])
+        self.decoders = []
+        for i in range(numTextures):
+            self.decoders.append(tf.keras.Sequential([
+                layers.Conv2DTranspose(256, kernel_size=3, strides=2, padding="same"),
+                tfa.layers.InstanceNormalization(),
+                layers.ReLU(),
+                layers.Conv2DTranspose(128, kernel_size=3, strides=2, padding="same"),
+                tfa.layers.InstanceNormalization(),
+                layers.ReLU(),
+                layers.Conv2DTranspose(64, kernel_size=7, strides=2, padding="same"),
+                tfa.layers.InstanceNormalization(),
+                layers.ReLU(),
+                layers.Conv2D(3, (3,3), strides=1, padding="same", activation="sigmoid")
+                ])
+            )
         self.tileLatentSpace = False
+        self.numTextures = numTextures
         
     def call(self, x, training=False):
         x = tf.pad(x, tf.constant([[0,0],[8, 8,], [8, 8],[0,0]]), "REFLECT")
@@ -102,9 +94,11 @@ class TextureGenerator(Model):
             result = np.tile(result,[1,2,2,1])
         for residualBlock in self.residualBlocks:
             result = result + residualBlock(result)#tf.pad(residualBlock(result), tf.constant([[0,0],[1,1],[1,1],[0,0]]))
-        albedoResult = self.albedoDecoder(result)
-        normalResult = self.normalDecoder(result)
-        return tf.concat([albedoResult,normalResult], axis=3)
+        concatenatedResult = None
+        for i,decoder in enumerate(self.decoders):
+            nthTexture = decoder(result)
+            concatenatedResult = nthTexture if concatenatedResult == None else tf.concat([concatenatedResult,nthTexture], axis=3)
+        return concatenatedResult
     def chunkedCall(self, x):
         global NUM_DECODER_CHUNKS
         x = tf.pad(x, tf.constant([[0,0],[8, 8,], [8, 8],[0,0]]), "REFLECT")
@@ -121,15 +115,14 @@ class TextureGenerator(Model):
         for ix in range(NUM_DECODER_CHUNKS):
             for iy in range(NUM_DECODER_CHUNKS):
                 chunk = result[:,ix*chunkSize:(ix+1)*chunkSize+10,iy*chunkSize:(iy+1)*chunkSize+10,:]
-                chunkResultAlbedo = self.albedoDecoder(chunk)[:,40:-40,40:-40,:]
-#                 if finalResult == None and lineResult == None:
-#                     print(chunk.shape)
-#                     print(chunkResultAlbedo.shape)
-                chunkResultNormal = self.normalDecoder(chunk)[:,40:-40,40:-40,:]
+                concatenatedChunkResult = None
+                for i,decoder in enumerate(self.decoders):
+                    nthTexture = decoder(chunk)
+                    concatenatedChunkResult = nthTexture if concatenatedChunkResult == None else tf.concat([concatenatedChunkResult,nthTexture], axis=3)
                 if lineResult == None:
-                    lineResult = tf.concat([chunkResultAlbedo, chunkResultNormal], axis=3)
+                    lineResult = concatenatedChunkResult
                 else:
-                    lineResult = tf.concat([lineResult, tf.concat([chunkResultAlbedo, chunkResultNormal], axis=3)], axis=2)
+                    lineResult = tf.concat([lineResult, concatenatedChunkResult], axis=2)
             if finalResult == None:
                 finalResult = lineResult
             else:
@@ -138,10 +131,10 @@ class TextureGenerator(Model):
         return finalResult
     
 class TextureDiscriminator(Model):
-    def __init__(self):
+    def __init__(self, numTextures):
         super(TextureDiscriminator, self).__init__()
         self.model = tf.keras.Sequential([
-            layers.Conv2D(64, (4,4), strides=2, padding="same", input_shape=(None, None, 6)),
+            layers.Conv2D(64, (4,4), strides=2, padding="same", input_shape=(None, None, numTextures*3)),
             tfa.layers.InstanceNormalization(),
             layers.LeakyReLU(),
             layers.Conv2D(128, (4,4), strides=1, padding="same"),
@@ -228,15 +221,15 @@ def trainStep(realImages, croppedImages):
 def buildBatch(files, batchSize, maxImageWidth):
     global baseImage
     if baseImage == None:
-        loadBaseImage()
+        loadImageStack()
     images = None
     #randomFiles = random.choices(files, k=batchSize)
     #for file in randomFiles:
     #    img = PIL.Image.open("images/"+file)
     for i in range(batchSize):
         size = maxImageWidth
-        posX = random.randrange(0, baseImage.shape[0]-size)
-        posY = random.randrange(0, baseImage.shape[1]-size)
+        posX = random.randrange(0, baseImage.shape[1]-size)
+        posY = random.randrange(0, baseImage.shape[0]-size)
         cropped = tf.cast(tf.image.crop_to_bounding_box(baseImage, posY, posX, size, size), dtype=tf.float32) / 255.
         images = tf.expand_dims(cropped, axis=0) if images == None else tf.stack([images,cropped])
         
@@ -248,15 +241,13 @@ def buildBatch(files, batchSize, maxImageWidth):
         oy = sy // 2
         subCrop = tf.cast(tf.image.crop_to_bounding_box(i,ox,oy,sx,sy), dtype=tf.float32) / 255.
         croppedImages = tf.expand_dims(subCrop, axis=0) if croppedImages == None else tf.stack([croppedImages,subCrop])
-    
-    croppedImages = tf.convert_to_tensor(croppedImages)
-    
+        
     return images, croppedImages
 
 def loadTestImage(k):
     global baseImage
     if baseImage == None:
-        loadBaseImage()
+        loadImageStack()
     images = []
     posX = (baseImage.shape[0] - k)//2
     posY = (baseImage.shape[1] - k)//2
@@ -265,6 +256,11 @@ def loadTestImage(k):
     return tf.convert_to_tensor(images).numpy().astype("float32") / 255.
 
 def saveTestImage(index):
+    global testImage
+    
+    if testImage is None:
+        testImage = loadTestImage(IMAGE_WIDTH_TESTING)
+    
     resultingImage = genModel(testImage[0:1])
     fakeDisOutput = discModel(resultingImage).numpy() * 255.0
     fakeDisOutput = np.tile(fakeDisOutput, (1,1,3))
@@ -273,17 +269,18 @@ def saveTestImage(index):
     print(fakeDisOutput.shape)
     print(realDisOutput.shape)
     
-    pilImage = PIL.Image.fromarray((resultingImage[0,:,:,:3].numpy() * 255.0).astype("uint8"))
-    pilImageNormal = PIL.Image.fromarray((resultingImage[0,:,:,3:6].numpy() * 255.0).astype("uint8"))
-    pil2Image = PIL.Image.fromarray((testImage[0,:,:,:3]*255.).astype("uint8"))
-    pil2ImageNormal = PIL.Image.fromarray((testImage[0,:,:,3:6]*255.).astype("uint8"))
+    
+    outputImage = PIL.Image.new("RGB", (IMAGE_WIDTH_TESTING * 3, IMAGE_WIDTH_TESTING * 2 * genModel.numTextures))
+
+    #print all subtextures to the output image
+    for i in range(genModel.numTextures):
+        subImage = PIL.Image.fromarray((resultingImage[0,:,:,i*3:(i+1)*3].numpy() * 255.0).astype("uint8"))
+        subInput = PIL.Image.fromarray((testImage[0,:,:,i*3:(i+1)*3]*255.).astype("uint8"))
+        outputImage.paste(subImage, (0, IMAGE_WIDTH_TESTING * 2 * i))
+        outputImage.paste(subInput, (IMAGE_WIDTH_TESTING * 2, IMAGE_WIDTH_TESTING * 2 * i))
+
     pilDisImage = PIL.Image.fromarray(fakeDisOutput[0].astype("uint8"))
     pilDisImage2 = PIL.Image.fromarray(realDisOutput[0].astype("uint8"))
-    outputImage = PIL.Image.new("RGB", (IMAGE_WIDTH_TESTING * 4, IMAGE_WIDTH_TESTING * 4))
-    outputImage.paste(pilImage, (0,0))
-    outputImage.paste(pilImageNormal, (0,IMAGE_WIDTH_TESTING * 2))
-    outputImage.paste(pil2Image, (IMAGE_WIDTH_TESTING * 2,0))
-    outputImage.paste(pil2ImageNormal, (IMAGE_WIDTH_TESTING * 2,IMAGE_WIDTH_TESTING * 2))
     outputImage.paste(pilDisImage, (IMAGE_WIDTH_TESTING * 2, IMAGE_WIDTH_TESTING))
     outputImage.paste(pilDisImage2, (IMAGE_WIDTH_TESTING * 2, IMAGE_WIDTH_TESTING+IMAGE_WIDTH_TESTING//2))
     
@@ -303,13 +300,13 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
     global asyncBatchBuffer
     global asyncBatchBufferCropped
     global SILENT
+    global genModel
     
     iterations = untilI - startI
     genOptimizer.learning_rate = learningRate
     discOptimizer.learning_rate = learningRate * DISC_LEARNING_FACTOR
     
-    #TODO: this line has the number of channels baked into it
-    trainStepFunction = tf.function(trainStep, input_signature=(tf.TensorSpec(shape=[batchSize,k*2,k*2,6], dtype=tf.float32),tf.TensorSpec(shape=[batchSize,k,k,6], dtype=tf.float32),))
+    trainStepFunction = tf.function(trainStep, input_signature=(tf.TensorSpec(shape=[batchSize,k*2,k*2,genModel.numTextures*3], dtype=tf.float32),tf.TensorSpec(shape=[batchSize,k,k,genModel.numTextures*3], dtype=tf.float32),))
     
     threading.Thread(target=asyncLoadBatch, args=(files,batchSize,k,)).start()
     
@@ -335,6 +332,7 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
             saveTestImage(i)
             
 def saveTileableTextures(k, crop=True, filesuffix="", customInput=None):
+    global genModel
     
     genModel.tileLatentSpace = True
     if customInput != None:
@@ -342,18 +340,17 @@ def saveTileableTextures(k, crop=True, filesuffix="", customInput=None):
         k = customInput.shape[1]
     else:
         genInput = loadTestImage(k)
+        
+    #we assume that the tileable texture has a pretty big input and use the chunked call by default.
     genOutput = genModel.chunkedCall(genInput)
     
-    if crop:
-        albedoMap = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,:3].numpy() * 255.0).astype("uint8"))
-        normalMap = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,3:6].numpy() * 255.0).astype("uint8"))
-    else:
-        albedoMap = PIL.Image.fromarray((genOutput[0,:,:,:3].numpy() * 255.0).astype("uint8"))
-        normalMap = PIL.Image.fromarray((genOutput[0,:,:,3:6].numpy() * 255.0).astype("uint8"))
+    for i in range(genModel.numTextures):
+        if crop:
+            texture = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,i*3:(i+1)*3].numpy() * 255.0).astype("uint8"))
+        else:
+            texture = PIL.Image.fromarray((genOutput[0,:,:,i*3:(i+1)*3].numpy() * 255.0).astype("uint8"))
         
-    
-    albedoMap.save(currentProjectPath+"albedo" + (("_" + filesuffix) if filesuffix else "") + ".png")
-    normalMap.save(currentProjectPath+"normal" + (("_" + filesuffix) if filesuffix else "") + ".png")
+        texture.save(("%soutput%d%s.png" % (currentProjectPath, i, (("_" + filesuffix) if filesuffix else ""))))
     
     genModel.tileLatentSpace = False
 
@@ -364,8 +361,8 @@ def saveGeneratorWeights(path):
     genModel.encoder.save_weights(path+"gen/enc")
     for i, resBlock in enumerate(genModel.residualBlocks):
         resBlock.save_weights(path+"gen/res"+str(i))
-    genModel.albedoDecoder.save_weights(path+"gen/adec")
-    genModel.normalDecoder.save_weights(path+"gen/ndec")
+    for i, decoder in enumerate(genModel.decoders):
+        decoder.save_weights(path+("gen/dec%d" % i))
 
 def saveDiscriminatorWeights(path):
     discModel.model.save_weights(path+"disc/weights")
@@ -377,20 +374,29 @@ def loadWeights(path):
     genModel.encoder.load_weights(path+"gen/enc")
     for i, resBlock in enumerate(genModel.residualBlocks):
         resBlock.load_weights(path+"gen/res"+str(i))
-    genModel.albedoDecoder.load_weights(path+"gen/adec")
-    genModel.normalDecoder.load_weights(path+"gen/ndec")
+    for i, decoder in enumerate(genModel.decoders):
+        decoder.load_weights(path+("gen/dec%d" % i))
     
     discModel.model.load_weights(path+"disc/weights")
 
 def createModels():
     global genModel
     global discModel
+    global baseImage
+    
+    #we need to make sure the input image stack is loaded to be able to tell the number of channels the generator model needs
+    if baseImage == None:
+        loadImageStack()
+    
+    #baseImage does not have the leading axis yet, so the number of channels are stored in axis index 2
+    numberOfTextures = baseImage.shape[2] // 3
+    
     if genModel == None:
-        genModel = TextureGenerator()
-        genModel(tf.fill([1,128,128,6],0.0))
+        genModel = TextureGenerator(numTextures=numberOfTextures)
+        genModel(tf.fill([1,128,128,genModel.numTextures*3],0.0))
         saveGeneratorWeights("")
     if discModel == None:
-        discModel = TextureDiscriminator()
+        discModel = TextureDiscriminator(numTextures=numberOfTextures)
         saveDiscriminatorWeights("")
     loadWeights("")
     
@@ -408,8 +414,10 @@ def saveModels():
     
 def setProject(projectName):
     global baseImage
+    global testImage
     global currentProjectPath
     baseImage = None
+    testImage = None
     oldProjectPath = currentProjectPath
     currentProjectPath = "projects/"+projectName+"/"
     try:
@@ -423,19 +431,23 @@ def setProject(projectName):
     except:
         pass
 
-def loadBaseImage():
+def loadImageStack():
     global baseImage
-    #load project input images
-    baseImage = PIL.Image.open(currentProjectPath+"images/albedo.png")
-    normalBaseImage = PIL.Image.open(currentProjectPath+"images/normal.png")
-
-    baseImage = tf.image.crop_to_bounding_box(baseImage, 0,0, baseImage.getbbox()[2], baseImage.getbbox()[3])
-    normalBaseImage = tf.image.crop_to_bounding_box(normalBaseImage, 0,0, normalBaseImage.getbbox()[2], normalBaseImage.getbbox()[3])
-    #remove alpha channels and concatenate
-    baseImage = baseImage[:,:,:3]
-    normalBaseImage = normalBaseImage[:,:,:3]
-    baseImage = tf.concat([baseImage, normalBaseImage], axis=2)
-    normalBaseImage = None
+    baseImage = None
+    
+    for imgFilename in os.listdir(currentProjectPath+"images/"):
+        if os.path.isfile(currentProjectPath+"images/"+imgFilename):
+            try:
+                image = PIL.Image.open(currentProjectPath+"images/"+imgFilename)
+                #convert to tensor (?) TODO: check if there is a cleaner option
+                image = tf.image.crop_to_bounding_box(image, 0,0, image.getbbox()[3], image.getbbox()[2])
+                #remove alpha channel
+                image = image[:,:,:3]
+                #add to stack
+                baseImage = image if baseImage == None else tf.concat([baseImage,image], axis=2)
+            except:
+                print("Warning: could not load base image with name %s, skipping..." % imgFilename)
+    
     
 def saveImage(inputData, filename):
     PIL.Image.fromarray((inputData.numpy() * 255.0).astype("uint8")).save(currentProjectPath+filename+".png")
@@ -508,7 +520,7 @@ def noiseExperiment(startK=16, iterations=5, makeFinalStack=True):
     originalPath = currentProjectPath
     currentProjectPath += "fromnoise/"
     os.mkdir(currentProjectPath)
-    inputNoise = tf.random.uniform(shape=(1,startK,startK,6), minval=0.0, maxval=1.0)
+    inputNoise = tf.random.uniform(shape=(1,startK,startK,genModel.numTextures*3), minval=0.0, maxval=1.0)
     saveImage(inputNoise[0,:,:,:3], ("n%d" % startK))
     output = None
     iterK = startK
@@ -537,7 +549,7 @@ def noiseSweep(k=256):
         #I really dont care right now, this is experimental code executed by real professionals
         pass
 
-    noise = tf.random.uniform(shape=(1,k,k,6), minval=0.05, maxval=0.95)
+    noise = tf.random.uniform(shape=(1,k,k,genModel.numTextures*3), minval=0.05, maxval=0.95)
     
     for i in range(101):
         infoFactor = 1 - (i/100)
@@ -548,7 +560,7 @@ def noiseSweep(k=256):
     currentProjectPath = originalPath
 
 currentProjectPath = "projects/default/"
-baseImage = loadBaseImage()
+baseImage = loadImageStack()
 files = os.listdir(currentProjectPath+"images")
 setProject("default")
 testImage = loadTestImage(256)
