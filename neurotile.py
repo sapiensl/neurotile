@@ -124,7 +124,7 @@ class TextureGenerator(Model):
                 concatenatedChunkResult = None
                 for i,decoder in enumerate(self.decoders):
                     nthTexture = decoder(chunk)
-                    concatenatedChunkResult = nthTexture if concatenatedChunkResult == None else tf.concat([concatenatedChunkResult,nthTexture], axis=3)
+                    concatenatedChunkResult = nthTexture[:,40:-40,40:-40,:] if concatenatedChunkResult == None else tf.concat([concatenatedChunkResult,nthTexture[:,40:-40,40:-40,:]], axis=3)
                 if lineResult == None:
                     lineResult = concatenatedChunkResult
                 else:
@@ -316,7 +316,7 @@ def logLossValues(i):
     with open(currentProjectPath + "losses.csv", "a") as lossCSV:
         lossCSV.write("%d;%f;%f;%f\n" % (i, lastLAdv, lastL1, lastLStyle))
         print("i: %d\tLAdv: %f\tL1: %f\tLStyle: %f" % (i, lastLAdv, lastL1, lastLStyle))
-        
+
 def plotLosses():
     iterations = []
     LAdv = []
@@ -344,7 +344,7 @@ def plotLosses():
         axis[2].plot(iterations, LStyle)
         axis[2].set_title("LStyle")
           
-        plt.show()
+        plt.show(block=False)
     except:
         print(traceback.format_exc())
         print("could not open losses.csv in this projects directory.")
