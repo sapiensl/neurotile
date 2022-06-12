@@ -30,6 +30,10 @@ USE_L1 = True
 USE_LADV = True
 USE_LSTYLE = True
 
+LAMBDA_L1 = 10.0
+LAMBDA_LADV = 1.0
+LAMBDA_LSTYLE = 1.0
+
 USE_PATCH_L1 = False
 
 SILENT = False
@@ -184,6 +188,9 @@ def generatorLoss(fakeOutput, realImages, fakeImages):
     global lastL1
     global lastLAdv
     global lastLStyle
+    global LAMBDA_L1
+    global LAMBDA_LADV
+    global LAMBDA_STYLE
     
     if USE_LADV:
         discLoss = losses.BinaryCrossentropy(from_logits=False)(tf.ones_like(fakeOutput), fakeOutput)
@@ -196,7 +203,7 @@ def generatorLoss(fakeOutput, realImages, fakeImages):
             L1 = patchL1(realImages, fakeImages)
             lastL1 = tf.math.reduce_sum(L1)
         else:
-            L1 = losses.MeanAbsoluteError()(realImages[:,:,:,:3], fakeImages[:,:,:,:3])
+            L1 = losses.MeanAbsoluteError()(realImages, fakeImages)
             lastL1 = L1
     else:
         L1 = 0
@@ -206,10 +213,10 @@ def generatorLoss(fakeOutput, realImages, fakeImages):
     lastLStyle = 0.0
     if USE_LSTYLE:
         for i in range(genModel.numTextures):
-            styleLoss += calculateStyleLoss(styleModel, realImages[:,:,:,i*3:(i+1)*3], fakeImages[:,:,:,i*3:(i+1)*3])
+            styleLoss += (1/genModel.numTextures)*calculateStyleLoss(styleModel, realImages[:,:,:,i*3:(i+1)*3], fakeImages[:,:,:,i*3:(i+1)*3])
         lastLStyle = styleLoss
     #print("%f   -   %f   -   %f" % (dissLoss, likenessLoss, styleLoss))
-    return discLoss + (10.0 * L1) + styleLoss
+    return (LAMBDA_LADV * discLoss) + (LAMBDA_L1 * L1) + (LAMBDA_LSTYLE * styleLoss)
         
 genOptimizer = optimizers.Adam(0.0002)
 discOptimizer = optimizers.Adam(0.0002)
@@ -542,11 +549,15 @@ def turboLearning():
     createModels()
     clearLossLog()
     tf.keras.backend.clear_session()
-    train(0,1000,0.00075,IMAGE_WIDTH_TRAINING,100)
-    train(1000,2000,0.000333,IMAGE_WIDTH_TRAINING,100)
-    train(2000,3000,0.0001,IMAGE_WIDTH_TRAINING,100)
-    train(3000,4000,0.00001,IMAGE_WIDTH_TRAINING,100)
-    train(4000,5000,0.000008,IMAGE_WIDTH_TRAINING,100)
+    train(0,500,0.0002,IMAGE_WIDTH_TRAINING,100)
+    
+    for i in range(10):
+        trainFactor = 0.001 / (2.0*i+1)
+        print("CURRENT TRAIN FACTOR: %f" % trainFactor)
+        train(500+i*1000, 1500+i*1000, trainFactor, IMAGE_WIDTH_TRAINING, 100)
+    
+    train(10500,11000,0.00001,IMAGE_WIDTH_TRAINING,100)
+    train(11000,15000,0.000008,IMAGE_WIDTH_TRAINING,100)
     saveModels()
     tf.keras.backend.clear_session()
     saveTileableTextures(1024)
