@@ -16,6 +16,7 @@ import PIL.Image
 import threading
 import csv
 import traceback
+import json
 
 from styleloss import *
 import time
@@ -43,6 +44,7 @@ IMAGE_WIDTH_TRAINING = 128
 IMAGE_WIDTH_TESTING = 256
 DISC_LEARNING_FACTOR = 1.0
 NUM_DECODER_CHUNKS = 8
+ENCODER_DEPTH = 2 #meaning the input texture will be (1/(2^ENCODER_DEPTH)) in size when encoded, standard is 2 -> 1/4
 batchSize = 1
 
 genModel = None
@@ -60,17 +62,20 @@ lastLAdv = 0.0
 class TextureGenerator(Model):
     def __init__(self, numTextures=2):
         super(TextureGenerator, self).__init__()
-        self.encoder = tf.keras.Sequential([
-            layers.Conv2D(64, (7,7), strides=2, padding="valid", input_shape=(None, None, numTextures*3)),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU(),
-            layers.Conv2D(128, (3,3), strides=2, padding="valid"),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU(),
-            layers.Conv2D(256, (3,3), strides=1, padding="valid"),
-            tfa.layers.InstanceNormalization(),
-            layers.ReLU()
-            ])
+        self.encoder = tf.keras.Sequential()
+        self.encoder.add(layers.Conv2D(64, (7,7), strides=2, padding="valid", input_shape=(None, None, numTextures*3)))
+        self.encoder.add(tfa.layers.InstanceNormalization())
+        self.encoder.add(layers.ReLU())
+        
+        for i in range(1,ENCODER_DEPTH):
+            self.encoder.add(layers.Conv2D(128, (3,3), strides=2, padding="valid"))
+            self.encoder.add(tfa.layers.InstanceNormalization())
+            self.encoder.add(layers.ReLU())
+        
+        self.encoder.add(layers.Conv2D(256, (3,3), strides=1, padding="valid"))
+        self.encoder.add(tfa.layers.InstanceNormalization())
+        self.encoder.add(layers.ReLU())
+                         
         self.residualBlocks = []
         for i in range(NUM_RESIDUAL_BLOCKS):
             newResidualBlock = tf.keras.Sequential([
@@ -81,24 +86,32 @@ class TextureGenerator(Model):
             self.residualBlocks.append(newResidualBlock)
         self.decoders = []
         for i in range(numTextures):
-            self.decoders.append(tf.keras.Sequential([
-                layers.Conv2DTranspose(256, kernel_size=3, strides=2, padding="same"),
-                tfa.layers.InstanceNormalization(),
-                layers.ReLU(),
-                layers.Conv2DTranspose(128, kernel_size=3, strides=2, padding="same"),
-                tfa.layers.InstanceNormalization(),
-                layers.ReLU(),
-                layers.Conv2DTranspose(64, kernel_size=7, strides=2, padding="same"),
-                tfa.layers.InstanceNormalization(),
-                layers.ReLU(),
-                layers.Conv2D(3, (3,3), strides=1, padding="same", activation="sigmoid")
-                ])
-            )
+            newDecoder = tf.keras.Sequential()
+            newDecoder.add(layers.Conv2DTranspose(256, kernel_size=3, strides=2, padding="same"))
+            newDecoder.add(tfa.layers.InstanceNormalization())
+            newDecoder.add(layers.ReLU())
+            
+            for j in range(1, ENCODER_DEPTH):
+                newDecoder.add(layers.Conv2DTranspose(128, kernel_size=3, strides=2, padding="same"))
+                newDecoder.add(tfa.layers.InstanceNormalization())
+                newDecoder.add(layers.ReLU())
+
+            newDecoder.add(layers.Conv2DTranspose(64, kernel_size=7, strides=2, padding="same"))
+            newDecoder.add(tfa.layers.InstanceNormalization())
+            newDecoder.add(layers.ReLU())
+            newDecoder.add(layers.Conv2D(3, (3,3), strides=1, padding="same", activation="sigmoid"))
+            self.decoders.append(newDecoder)
         self.tileLatentSpace = False
         self.numTextures = numTextures
+        self.requiredPadding = 2
+        for i in range(1,ENCODER_DEPTH):
+            self.requiredPadding += 2**(i+1)
+        self.requiredPadding += 3
+        #print("requiredPadding for encoding depth %d is %d" % (ENCODER_DEPTH, self.requiredPadding))
         
     def call(self, x, training=False):
-        x = tf.pad(x, tf.constant([[0,0],[8, 8,], [8, 8],[0,0]]), "REFLECT")
+        p = self.requiredPadding
+        x = tf.pad(x, tf.constant([[0,0],[p, p], [p, p],[0,0]]), "REFLECT")
         result = self.encoder(x)
         if self.tileLatentSpace:
             result = np.tile(result,[1,2,2,1])
@@ -111,7 +124,8 @@ class TextureGenerator(Model):
         return concatenatedResult
     def chunkedCall(self, x):
         global NUM_DECODER_CHUNKS
-        x = tf.pad(x, tf.constant([[0,0],[8, 8,], [8, 8],[0,0]]), "REFLECT")
+        p = self.requiredPadding
+        x = tf.pad(x, tf.constant([[0,0],[p, p,], [p, p],[0,0]]), "REFLECT")
         result = self.encoder(x)
         if self.tileLatentSpace:
             result = np.tile(result,[1,2,2,1])
@@ -316,7 +330,7 @@ def logLossValues(i):
     realImages, croppedImages = buildBatch(None, 1, IMAGE_WIDTH_TRAINING*2)
     fakeImages = genModel(croppedImages, training=False)
     fakeOutput = discModel(fakeImages, training=False)
-    _ = generatorLoss(fakeOutput, realImages, fakeImages)
+    genLoss = generatorLoss(fakeOutput, realImages, fakeImages)
     global lastLAdv
     global lastL1
     global lastLStyle
@@ -324,7 +338,7 @@ def logLossValues(i):
         lossCSV.write("%d;%f;%f;%f\n" % (i, lastLAdv, lastL1, lastLStyle))
         print("i: %d\tLAdv: %f\tL1: %f\tLStyle: %f" % (i, lastLAdv, lastL1, lastLStyle))
 
-def plotLosses():
+def plotLosses(startIndex=0, saveAsPDF=False):
     iterations = []
     LAdv = []
     L1 = []
@@ -344,17 +358,38 @@ def plotLosses():
                 LStyle.append(float(row[3]))
                 
         figure, axis = plt.subplots(3)
-        axis[0].plot(iterations,LAdv)
-        axis[0].set_title("LAdv")
-        axis[1].plot(iterations,L1)
+        figure.canvas.manager.set_window_title(currentProjectPath)
+        axis[0].plot(iterations[startIndex:],LAdv[startIndex:])
+        axis[0].set_title(currentProjectPath+"  -  LAdv")
+        axis[1].plot(iterations[startIndex:],L1[startIndex:])
         axis[1].set_title("L1")
-        axis[2].plot(iterations, LStyle)
+        axis[2].plot(iterations[startIndex:], LStyle[startIndex:])
         axis[2].set_title("LStyle")
-          
-        plt.show(block=False)
+        
+        if saveAsPDF:
+            plt.savefig(currentProjectPath+"losses.pdf")
+            plt.close()
+        else:
+            plt.show(block=False)
+            
     except:
         print(traceback.format_exc())
         print("could not open losses.csv in this projects directory.")
+        
+def saveAllLossPDFs():
+    global currentProjectPath
+    pathBackup = currentProjectPath
+    for project in os.listdir("projects/"):
+        setProject(project)
+        plotLosses(1,True)
+    currentProjectPath = pathBackup
+    
+def copyAllLossPDFs():
+    for project in os.listdir("projects/"):
+        try:
+            shutil.copyfile("projects/"+project+"/losses.pdf", "projects/"+project+".pdf")
+        except:
+            pass
 
 def asyncLoadBatch(files, batchSize, k):
     global batchSem
@@ -475,15 +510,129 @@ def createModels():
 def loadModels():
     global genModel
     global discModel
+    loadConfiguration()
     createModels()
     loadWeights(currentProjectPath)
     
 def saveModels():
     global genModel
     global discModel
+    saveConfiguration()
     saveGeneratorWeights(currentProjectPath)
     saveDiscriminatorWeights(currentProjectPath)
     
+def saveConfiguration():
+    configDict = {
+        "USE_L1" : USE_L1,
+        "USE_LADV" : USE_LADV,
+        "USE_LSTYLE" : USE_LSTYLE,
+
+        "LAMBDA_L1" : LAMBDA_L1,
+        "LAMBDA_LADV" : LAMBDA_LADV,
+        "LAMBDA_LSTYLE" : LAMBDA_LSTYLE,
+
+        "USE_PATCH_L1" : USE_PATCH_L1,
+
+        "SILENT" : SILENT,
+
+        "NUM_RESIDUAL_BLOCKS" : NUM_RESIDUAL_BLOCKS,
+        "IMAGE_WIDTH_TRAINING" : IMAGE_WIDTH_TRAINING,
+        "IMAGE_WIDTH_TESTING" : IMAGE_WIDTH_TESTING,
+        "DISC_LEARNING_FACTOR" : DISC_LEARNING_FACTOR,
+        "NUM_DECODER_CHUNKS" : NUM_DECODER_CHUNKS,
+        "ENCODER_DEPTH" : ENCODER_DEPTH,
+        "batchSize" : batchSize
+
+        }
+    print(configDict)
+    with open(currentProjectPath + "project.conf", "w") as configFile:
+        configFile.write(json.dumps(configDict, indent=4))
+    
+def loadConfiguration():
+    global USE_L1
+    global USE_LADV
+    global USE_LSTYLE
+    global LAMBDA_L1
+    global LAMBDA_LADV
+    global LAMBDA_LSTYLE
+    global USE_PATCH_L1
+    global SILENT
+    global NUM_RESIDUAL_BLOCKS
+    global NUM_DECODER_CHUNKS
+    global ENCODER_DEPTH
+    global IMAGE_WIDTH_TESTING
+    global IMAGE_WIDTH_TRAINING
+    global DISC_LEARNING_FACTOR
+    global batchSize
+    configDict = {}
+    try:
+        with open(currentProjectPath + "project.conf") as configFile:
+            configDict = json.loads(configFile.read())
+    except:
+        print("Could not load config from file, reverting to defaults")
+        defaultConfiguration()
+
+
+    USE_L1 = True if "USE_L1" not in configDict else configDict["USE_L1"]
+    USE_LADV = True if "USE_LADV" not in configDict else configDict["USE_LADV"]
+    USE_LSTYLE = True if "USE_LSTYLE" not in configDict else configDict["USE_LSTYLE"]
+
+    LAMBDA_L1 = 10.0 if "LAMBDA_L1" not in configDict else configDict["LAMBDA_L1"]
+    LAMBDA_LADV = 1.0 if "LAMBDA_LADV" not in configDict else configDict["LAMBDA_LADV"]
+    LAMBDA_LSTYLE = 1.0 if "LAMBDA_LSTYLE" not in configDict else configDict["LAMBDA_LSTYLE"]
+
+    USE_PATCH_L1 = False if "USE_PATCH_L1" not in configDict else configDict["USE_PATCH_L1"]
+
+    SILENT = False if "SILENT" not in configDict else configDict["SILENT"]
+
+    NUM_RESIDUAL_BLOCKS = 5 if "NUM_RESIDUAL_BLOCKS" not in configDict else configDict["NUM_RESIDUAL_BLOCKS"]
+    IMAGE_WIDTH_TRAINING = 128 if "IMAGE_WIDTH_TRAINING" not in configDict else configDict["IMAGE_WIDTH_TRAINING"]
+    IMAGE_WIDTH_TESTING = 256 if "IMAGE_WIDTH_TESTING" not in configDict else configDict["IMAGE_WIDTH_TESTING"]
+    DISC_LEARNING_FACTOR = 1.0 if "DISC_LEARNING_FACTOR" not in configDict else configDict["DISC_LEARNING_FACTOR"]
+    NUM_DECODER_CHUNKS = 8 if "NUM_DECODER_CHUNKS" not in configDict else configDict["NUM_DECODER_CHUNKS"]
+    ENCODER_DEPTH = 2 if "ENCODER_DEPTH" not in configDict else configDict["ENCODER_DEPTH"]
+    batchSize = 1 if "batchSize" not in configDict else configDict["batchSize"]
+    
+    print(configDict)
+    
+def defaultConfiguration():
+    global USE_L1
+    global USE_LADV
+    global USE_LSTYLE
+    global LAMBDA_L1
+    global LAMBDA_LADV
+    global LAMBDA_LSTYLE
+    global USE_PATCH_L1
+    global SILENT
+    global NUM_RESIDUAL_BLOCKS
+    global NUM_DECODER_CHUNKS
+    global ENCODER_DEPTH
+    global IMAGE_WIDTH_TESTING
+    global IMAGE_WIDTH_TRAINING
+    global DISC_LEARNING_FACTOR
+    global batchSize
+    
+    
+    USE_L1 = True
+    USE_LADV = True
+    USE_LSTYLE = True
+
+    LAMBDA_L1 = 10.0
+    LAMBDA_LADV = 1.0
+    LAMBDA_LSTYLE = 1.0
+
+    USE_PATCH_L1 = False
+
+    SILENT = False
+
+    NUM_RESIDUAL_BLOCKS = 5
+    IMAGE_WIDTH_TRAINING = 128
+    IMAGE_WIDTH_TESTING = 256
+    DISC_LEARNING_FACTOR = 1.0
+    NUM_DECODER_CHUNKS = 8
+    ENCODER_DEPTH = 2
+    batchSize = 1
+
 def setProject(projectName):
     global baseImage
     global testImage
@@ -498,8 +647,9 @@ def setProject(projectName):
         pass
     try:
         os.mkdir(currentProjectPath+"images")
-        #shutil.copyfile(oldProjectPath + "images/albedo.png", currentProjectPath + "images/albedo.png")
-        #shutil.copyfile(oldProjectPath + "images/normal.png", currentProjectPath + "images/normal.png")
+        #TODO: rewrite to not be dependent on these hardcoded textures
+        shutil.copyfile(oldProjectPath + "images/albedo.png", currentProjectPath + "images/albedo.png")
+        shutil.copyfile(oldProjectPath + "images/normal.png", currentProjectPath + "images/normal.png")
     except:
         pass
 
@@ -636,6 +786,48 @@ def noiseSweep(k=256):
         saveImage(mix[0,:,:,:3], ("mix%d" % i))
         saveTileableTextures(0, True, ("noise%dpercent" %i), mix)
     currentProjectPath = originalPath
+    
+def lambdaStudy(basename, startAtPermutation=0):
+    global LAMBDA_L1
+    global LAMBDA_LADV
+    global LAMBDA_STYLE
+    
+    sTime = time.time()
+    
+    permutation = -1
+    
+    for ilstyle in [1,10,50]:
+        for iladv in [1,10,50]:
+            for il1 in [1,10,50]:
+                permutation += 1
+                if permutation < startAtPermutation:
+                    continue #this is added to make it possible to resume the study on our cluster which automatically closes the session after 4 hours
+                LAMBDA_LADV = float(iladv)
+                LAMBDA_L1 = float(il1)
+                LAMBDA_STYLE = float(ilstyle)
+                setProject("%s_l1-%d_ladv-%d_lstyle-%d" % (basename, il1, iladv, ilstyle))
+                createModels()
+                clearLossLog()
+                tf.keras.backend.clear_session()
+                train(0,10000,0.0002,IMAGE_WIDTH_TRAINING,500)
+                saveModels()
+                tf.keras.backend.clear_session()
+    
+    print("finished lambda study in %d minutes. Bye!" % int((time.time()-sTime)/60))
+                
+def inputTextureSizeStudy(projectNameList):
+    for projectName in projectNameList:
+        setProject(projectName)
+        createModels()
+        clearLossLog()
+        tf.keras.backend.clear_session()
+        train(0,15000,0.0002,IMAGE_WIDTH_TRAINING,500)
+        saveModels()
+        train(15000,30001,0.0002,IMAGE_WIDTH_TRAINING,500)
+        saveModels()
+        tf.keras.backend.clear_session()
+    
+
 
 currentProjectPath = "projects/default/"
 baseImage = loadImageStack()
