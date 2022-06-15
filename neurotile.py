@@ -45,6 +45,11 @@ IMAGE_WIDTH_TESTING = 256
 DISC_LEARNING_FACTOR = 1.0
 NUM_DECODER_CHUNKS = 8
 ENCODER_DEPTH = 2 #meaning the input texture will be (1/(2^ENCODER_DEPTH)) in size when encoded, standard is 2 -> 1/4
+
+FEATUREMAP_START_SIZE = 64
+FEATUREMAP_INCREASE_FAC = 2
+FEATUREMAP_MAX_SIZE = 8192
+
 batchSize = 1
 
 genModel = None
@@ -62,41 +67,51 @@ lastLAdv = 0.0
 class TextureGenerator(Model):
     def __init__(self, numTextures=2):
         super(TextureGenerator, self).__init__()
+        
+        currentFMapSize = FEATUREMAP_START_SIZE
+        
         self.encoder = tf.keras.Sequential()
-        self.encoder.add(layers.Conv2D(64, (7,7), strides=2, padding="valid", input_shape=(None, None, numTextures*3)))
+        self.encoder.add(layers.Conv2D(currentFMapSize, (7,7), strides=2, padding="valid", input_shape=(None, None, numTextures*3)))
         self.encoder.add(tfa.layers.InstanceNormalization())
         self.encoder.add(layers.ReLU())
         
         for i in range(1,ENCODER_DEPTH):
-            self.encoder.add(layers.Conv2D(128, (3,3), strides=2, padding="valid"))
+            currentFMapSize = min(currentFMapSize * FEATUREMAP_INCREASE_FAC, FEATUREMAP_MAX_SIZE)
+            self.encoder.add(layers.Conv2D(currentFMapSize, (3,3), strides=2, padding="valid"))
             self.encoder.add(tfa.layers.InstanceNormalization())
             self.encoder.add(layers.ReLU())
+            
+        currentFMapSize = min(currentFMapSize * FEATUREMAP_INCREASE_FAC, FEATUREMAP_MAX_SIZE)
         
-        self.encoder.add(layers.Conv2D(256, (3,3), strides=1, padding="valid"))
+        self.encoder.add(layers.Conv2D(currentFMapSize, (3,3), strides=1, padding="valid"))
         self.encoder.add(tfa.layers.InstanceNormalization())
         self.encoder.add(layers.ReLU())
                          
         self.residualBlocks = []
         for i in range(NUM_RESIDUAL_BLOCKS):
             newResidualBlock = tf.keras.Sequential([
-            layers.Conv2D(256, (3,3), strides=1, padding="same"),
+            layers.Conv2D(currentFMapSize, (3,3), strides=1, padding="same"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU()
             ])
             self.residualBlocks.append(newResidualBlock)
+        
         self.decoders = []
         for i in range(numTextures):
+            currentDecoderFMapSize = currentFMapSize
             newDecoder = tf.keras.Sequential()
-            newDecoder.add(layers.Conv2DTranspose(256, kernel_size=3, strides=2, padding="same"))
+            newDecoder.add(layers.Conv2DTranspose(currentDecoderFMapSize, kernel_size=3, strides=2, padding="same"))
             newDecoder.add(tfa.layers.InstanceNormalization())
             newDecoder.add(layers.ReLU())
             
             for j in range(1, ENCODER_DEPTH):
-                newDecoder.add(layers.Conv2DTranspose(128, kernel_size=3, strides=2, padding="same"))
+                currentDecoderFMapSize //= FEATUREMAP_INCREASE_FAC
+                newDecoder.add(layers.Conv2DTranspose(currentDecoderFMapSize, kernel_size=3, strides=2, padding="same"))
                 newDecoder.add(tfa.layers.InstanceNormalization())
                 newDecoder.add(layers.ReLU())
 
-            newDecoder.add(layers.Conv2DTranspose(64, kernel_size=7, strides=2, padding="same"))
+            currentDecoderFMapSize //= FEATUREMAP_INCREASE_FAC
+            newDecoder.add(layers.Conv2DTranspose(currentDecoderFMapSize, kernel_size=7, strides=2, padding="same"))
             newDecoder.add(tfa.layers.InstanceNormalization())
             newDecoder.add(layers.ReLU())
             newDecoder.add(layers.Conv2D(3, (3,3), strides=1, padding="same", activation="sigmoid"))
@@ -541,7 +556,11 @@ def saveConfiguration():
         "DISC_LEARNING_FACTOR" : DISC_LEARNING_FACTOR,
         "NUM_DECODER_CHUNKS" : NUM_DECODER_CHUNKS,
         "ENCODER_DEPTH" : ENCODER_DEPTH,
-        "batchSize" : batchSize
+        "batchSize" : batchSize,
+        
+        "FEATUREMAP_INCREASE_FAC" : FEATUREMAP_INCREASE_FAC,
+        "FEATUREMAP_MAX_SIZE" : FEATUREMAP_MAX_SIZE,
+        "FEATUREMAP_START_SIZE" : FEATUREMAP_START_SIZE
 
         }
     print(configDict)
@@ -564,6 +583,10 @@ def loadConfiguration():
     global IMAGE_WIDTH_TRAINING
     global DISC_LEARNING_FACTOR
     global batchSize
+    global FEATUREMAP_INCREASE_FAC
+    global FEATUREMAP_MAX_SIZE
+    global FEATUREMAP_START_SIZE
+    
     configDict = {}
     try:
         with open(currentProjectPath + "project.conf") as configFile:
@@ -593,6 +616,10 @@ def loadConfiguration():
     ENCODER_DEPTH = 2 if "ENCODER_DEPTH" not in configDict else configDict["ENCODER_DEPTH"]
     batchSize = 1 if "batchSize" not in configDict else configDict["batchSize"]
     
+    FEATUREMAP_INCREASE_FAC = 2 if "FEATUREMAP_INCREASE_FAC" not in configDict else configDict["FEATUREMAP_INCREASE_FAC"]
+    FEATUREMAP_MAX_SIZE = 8192 if "FEATUREMAP_MAX_SIZE" not in configDict else configDict["FEATUREMAP_MAX_SIZE"]
+    FEATUREMAP_START_SIZE = 64 if "FEATUREMAP_START_SIZE" not in configDict else configDict["FEATUREMAP_START_SIZE"]
+    
     print(configDict)
     
 def defaultConfiguration():
@@ -611,6 +638,9 @@ def defaultConfiguration():
     global IMAGE_WIDTH_TRAINING
     global DISC_LEARNING_FACTOR
     global batchSize
+    global FEATUREMAP_INCREASE_FAC
+    global FEATUREMAP_MAX_SIZE
+    global FEATUREMAP_START_SIZE
     
     
     USE_L1 = True
@@ -632,6 +662,9 @@ def defaultConfiguration():
     NUM_DECODER_CHUNKS = 8
     ENCODER_DEPTH = 2
     batchSize = 1
+    FEATUREMAP_START_SIZE = 64
+    FEATUREMAP_INCREASE_FAC = 2
+    FEATUREMAP_MAX_SIZE = 8192
 
 def setProject(projectName):
     global baseImage
