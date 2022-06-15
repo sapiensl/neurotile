@@ -674,7 +674,7 @@ def loadImageStack():
 def saveImage(inputData, filename):
     PIL.Image.fromarray((inputData.numpy() * 255.0).astype("uint8")).save(currentProjectPath+filename+".png")
     
-def stdLearning():
+def stdLearning(saveFinalTexture=False):
     sTime = time.time()
     createModels()
     clearLossLog()
@@ -685,12 +685,11 @@ def stdLearning():
     saveModels()
     train(30000,40000,0.00004,IMAGE_WIDTH_TRAINING,500)
     saveModels()
-    train(40000,45000,0.00001,IMAGE_WIDTH_TRAINING,500)
-    saveModels()
-    train(45000,50001,0.000008,IMAGE_WIDTH_TRAINING,500)
+    train(40000,50001,0.000008,IMAGE_WIDTH_TRAINING,500)
     saveModels()
     tf.keras.backend.clear_session()
-    saveTileableTextures(1024)
+    if saveFinalTexture:
+        saveTileableTextures(1024)#TODO: use maximum input texture size instead of hard-coded value
     print("finished training in %d minutes. Bye!" % int((time.time()-sTime)/60))
     
 #experimental method for learning speedup evaluation
@@ -828,8 +827,8 @@ def inputTextureSizeStudy(projectNameList):
         tf.keras.backend.clear_session()
     
 
-
-currentProjectPath = "projects/default/"
+currentProjectFolder = "projects/"
+currentProjectPath = currentProjectFolder + "default/"
 baseImage = loadImageStack()
 files = os.listdir(currentProjectPath+"images")
 setProject("default")
