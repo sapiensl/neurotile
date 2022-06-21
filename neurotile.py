@@ -358,6 +358,9 @@ def plotLosses(startIndex=0, saveAsPDF=False):
     LAdv = []
     L1 = []
     LStyle = []
+    LAdvSmooth = []
+    LStyleSmooth = []
+    L1Smooth = []
     
     firstRow = True
     try:
@@ -372,14 +375,25 @@ def plotLosses(startIndex=0, saveAsPDF=False):
                 L1.append(float(row[2]))
                 LStyle.append(float(row[3]))
                 
+        LAdvSmooth = [sum(LAdv[i:i+10])/10.0 for i in range(len(LAdv)-10)]
+        L1Smooth = [sum(L1[i:i+10])/10.0 for i in range(len(L1)-10)]
+        LStyleSmooth = [sum(LStyle[i:i+10])/10.0 for i in range(len(LStyle)-10)]
+        
         figure, axis = plt.subplots(3)
         figure.canvas.manager.set_window_title(currentProjectPath)
-        axis[0].plot(iterations[startIndex:],LAdv[startIndex:])
-        axis[0].set_title(currentProjectPath+"  -  LAdv")
-        axis[1].plot(iterations[startIndex:],L1[startIndex:])
-        axis[1].set_title("L1")
-        axis[2].plot(iterations[startIndex:], LStyle[startIndex:])
-        axis[2].set_title("LStyle")
+        axis[0].plot(iterations[startIndex:],L1[startIndex:], color="blue")
+        axis[0].plot(iterations[startIndex:-10],L1Smooth[startIndex:], color="red")
+        axis[0].set_title(currentProjectPath+"  -  L1 -> %f" % min(L1Smooth))
+        axis[0].grid(True)
+        axis[1].plot(iterations[startIndex:],LAdv[startIndex:], color="blue")
+        axis[1].plot(iterations[startIndex:-10],LAdvSmooth[startIndex:], color="red")
+        axis[1].set_title("LAdv -> %f" % min(LAdvSmooth))
+        axis[1].grid(True)
+        axis[2].plot(iterations[startIndex:], LStyle[startIndex:], color="blue")
+        axis[2].plot(iterations[startIndex:-10],LStyleSmooth[startIndex:], color="red")
+        axis[2].set_title("LStyle -> %f" % min(LStyleSmooth))
+        axis[2].grid(True)
+        plt.tight_layout()
         
         if saveAsPDF:
             plt.savefig(currentProjectPath+"losses.pdf")
@@ -393,16 +407,19 @@ def plotLosses(startIndex=0, saveAsPDF=False):
         
 def saveAllLossPDFs():
     global currentProjectPath
+    global currentProjectFolder
     pathBackup = currentProjectPath
-    for project in os.listdir("projects/"):
+    for project in os.listdir(currentProjectFolder):
+        print(project)
         setProject(project)
-        plotLosses(1,True)
+        plotLosses(10,True)
     currentProjectPath = pathBackup
     
 def copyAllLossPDFs():
-    for project in os.listdir("projects/"):
+    global currentProjectFolder
+    for project in os.listdir(currentProjectFolder):
         try:
-            shutil.copyfile("projects/"+project+"/losses.pdf", "projects/"+project+".pdf")
+            shutil.copyfile(currentProjectFolder+project+"/losses.pdf", currentProjectFolder+project+".pdf")
         except:
             pass
 
@@ -673,7 +690,7 @@ def setProject(projectName):
     baseImage = None
     testImage = None
     oldProjectPath = currentProjectPath
-    currentProjectPath = "projects/"+projectName+"/"
+    currentProjectPath = currentProjectFolder+projectName+"/"
     try:
         os.mkdir(currentProjectPath)
     except:
