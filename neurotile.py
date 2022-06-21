@@ -35,7 +35,15 @@ LAMBDA_L1 = 10.0
 LAMBDA_LADV = 1.0
 LAMBDA_LSTYLE = 1.0
 
-USE_PATCH_L1 = False
+#these two decide how many times the resulting image is downsampled and sent through the respective loss calculation
+#1 means that only the original output will be taken into account
+#2 means that the original and a 1/2x downsampled version of it will be processed and the losses will be added together
+#3 means original, 1/2x and 1/4x are processed
+# and so on and so forth
+LSTYLE_LAYERS = 1
+LADV_LAYERS = 1 #TODO:implement
+
+USE_PATCH_L1 = False #TODO: might be broken by now, has not been maintained in a good while
 
 SILENT = False
 
@@ -220,6 +228,7 @@ def generatorLoss(fakeOutput, realImages, fakeImages):
     global LAMBDA_L1
     global LAMBDA_LADV
     global LAMBDA_STYLE
+    global LSTYLE_LAYERS
     
     if USE_LADV:
         discLoss = losses.BinaryCrossentropy(from_logits=False)(tf.ones_like(fakeOutput), fakeOutput)
@@ -242,7 +251,11 @@ def generatorLoss(fakeOutput, realImages, fakeImages):
     lastLStyle = 0.0
     if USE_LSTYLE:
         for i in range(genModel.numTextures):
-            styleLoss += (1/genModel.numTextures)*calculateStyleLoss(styleModel, realImages[:,:,:,i*3:(i+1)*3], fakeImages[:,:,:,i*3:(i+1)*3])
+            for downsamplingI in range(LSTYLE_LAYERS):
+                sampleSize = realImages.shape[1]//(2**downsamplingI)
+                realImg = realImages[:,:,:,i*3:(i+1)*3] if downsamplingI == 0 else tf.image.resize(realImages[:,:,:,i*3:(i+1)*3],(sampleSize, sampleSize))
+                fakeImg = fakeImages[:,:,:,i*3:(i+1)*3] if downsamplingI == 0 else tf.image.resize(fakeImages[:,:,:,i*3:(i+1)*3],(sampleSize, sampleSize))
+                styleLoss += (1/(genModel.numTextures*LSTYLE_LAYERS))*calculateStyleLoss(styleModel, realImg, fakeImg)
         lastLStyle = styleLoss
     #print("%f   -   %f   -   %f" % (dissLoss, likenessLoss, styleLoss))
     return (LAMBDA_LADV * discLoss) + (LAMBDA_L1 * L1) + (LAMBDA_LSTYLE * styleLoss)
@@ -562,6 +575,9 @@ def saveConfiguration():
         "LAMBDA_L1" : LAMBDA_L1,
         "LAMBDA_LADV" : LAMBDA_LADV,
         "LAMBDA_LSTYLE" : LAMBDA_LSTYLE,
+        
+        "LSTYLE_LAYERS" : LSTYLE_LAYERS,
+        "LADV_LAYERS" : LADV_LAYERS,
 
         "USE_PATCH_L1" : USE_PATCH_L1,
 
@@ -591,6 +607,8 @@ def loadConfiguration():
     global LAMBDA_L1
     global LAMBDA_LADV
     global LAMBDA_LSTYLE
+    global LSTYLE_LAYERS
+    global LADV_LAYERS
     global USE_PATCH_L1
     global SILENT
     global NUM_RESIDUAL_BLOCKS
@@ -620,6 +638,9 @@ def loadConfiguration():
     LAMBDA_L1 = 10.0 if "LAMBDA_L1" not in configDict else configDict["LAMBDA_L1"]
     LAMBDA_LADV = 1.0 if "LAMBDA_LADV" not in configDict else configDict["LAMBDA_LADV"]
     LAMBDA_LSTYLE = 1.0 if "LAMBDA_LSTYLE" not in configDict else configDict["LAMBDA_LSTYLE"]
+    
+    LSTYLE_LAYERS = 1 if "LSTYLE_LAYERS" not in configDict else configDict["LSTYLE_LAYERS"]
+    LADV_LAYERS = 1 if "LADV_LAYERS" not in configDict else configDict["LADV_LAYERS"]
 
     USE_PATCH_L1 = False if "USE_PATCH_L1" not in configDict else configDict["USE_PATCH_L1"]
 
@@ -646,6 +667,8 @@ def defaultConfiguration():
     global LAMBDA_L1
     global LAMBDA_LADV
     global LAMBDA_LSTYLE
+    global LSTYLE_LAYERS
+    global LADV_LAYERS
     global USE_PATCH_L1
     global SILENT
     global NUM_RESIDUAL_BLOCKS
@@ -667,6 +690,9 @@ def defaultConfiguration():
     LAMBDA_L1 = 10.0
     LAMBDA_LADV = 1.0
     LAMBDA_LSTYLE = 1.0
+    
+    LADV_LAYERS = 1
+    LSTYLE_LAYERS = 1
 
     USE_PATCH_L1 = False
 
