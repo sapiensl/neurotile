@@ -17,15 +17,21 @@ def calculateGramMatrix(inputTensor):
 
 def calculateStyleLoss(model, targetInput, lossyInput):
     global testI
+    targetInput = tf.image.resize(targetInput, (224,224))
+    lossyInput = tf.image.resize(lossyInput, (224,224))
+    
     targetOutputs = model(targetInput)
     lossyOutputs = model(lossyInput)
     targetOutputsGram = [calculateGramMatrix(i) for i in targetOutputs]
     lossyOutputsGram = [calculateGramMatrix(i) for i in lossyOutputs]
-    #this verision uses the latent image size of the respective layer as a quotient
+    #this version uses the latent image size of the respective layer as a quotient
+    #https://www.cv-foundation.org/openaccess/content_cvpr_2016/papers/Gatys_Image_Style_Transfer_CVPR_2016_paper.pdf
+    #https://www.researchgate.net/profile/Carlos-Rodriguez-Pardo/publication/334279687_Automatic_Extraction_and_Synthesis_of_Regular_Repeatable_Patterns/links/5d36da4a92851cd0467e5d35/Automatic-Extraction-and-Synthesis-of-Regular-Repeatable-Patterns.pdf?origin=publication_detail
     #styleLoss = tf.add_n([tf.reduce_sum(tf.reduce_sum((lOG - tOG)**2)) / ((2 * lO.shape[1] * lOG.shape[1])**2) * (1000.0 / (lOG.shape[1]**2)) for lOG, tOG, lO in zip(lossyOutputsGram, targetOutputsGram, lossyOutputs)])
+    styleLoss = tf.reduce_sum([tf.reduce_sum((lOG - tOG)**2) / ((2 * lO.shape[1] * lO.shape[2] * lO.shape[3])**2) * (1000.0 / (lO.shape[3]**2)) for lOG, tOG, lO in zip(lossyOutputsGram, targetOutputsGram, lossyOutputs)])
     
-    #this version uses the size of the generated image as a quotient. Results are much better this way
-    styleLoss = tf.add_n([tf.reduce_sum(tf.reduce_sum((lOG - tOG)**2)) / ((2 * lossyInput.shape[1] * lOG.shape[1])**2) * (1000.0 / (lOG.shape[1]**2)) for lOG, tOG, lO in zip(lossyOutputsGram, targetOutputsGram, lossyOutputs)])
+    #this version uses the size of the generated image as a quotient. Results are much better this way (UPDATE: might be inaccurate reimplementation according to previous paper from the same group
+    #styleLoss = tf.reduce_sum([tf.reduce_sum((lOG - tOG)**2) / ((2 * lossyInput.shape[1] * lOG.shape[1])**2) * (1000.0 / (lOG.shape[1]**2)) for lOG, tOG, lO in zip(lossyOutputsGram, targetOutputsGram, lossyOutputs)])
     return styleLoss
     
 
