@@ -16,7 +16,6 @@ def calculateGramMatrix(inputTensor):
     return result/(numLocations)
 
 def calculateStyleLoss(model, targetInput, lossyInput):
-    global testI
     targetInput = tf.image.resize(targetInput, (224,224))
     lossyInput = tf.image.resize(lossyInput, (224,224))
     

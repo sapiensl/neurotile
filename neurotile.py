@@ -50,6 +50,7 @@ SILENT = False
 NUM_RESIDUAL_BLOCKS = 5
 IMAGE_WIDTH_TRAINING = 128
 IMAGE_WIDTH_TESTING = 256
+IMAGE_USE_ADVANCED_PADDING = True # use the image itself to pad the input (during training) instead of reflection padding
 DISC_LEARNING_FACTOR = 1.0
 NUM_DECODER_CHUNKS = 8
 ENCODER_DEPTH = 2 #meaning the input texture will be (1/(2^ENCODER_DEPTH)) in size when encoded, standard is 2 -> 1/4
@@ -134,7 +135,9 @@ class TextureGenerator(Model):
         
     def call(self, x, training=False):
         p = self.requiredPadding
-        x = tf.pad(x, tf.constant([[0,0],[p, p], [p, p],[0,0]]), "REFLECT")
+        #only pad out the image if the input is not already padded
+        if not (training and IMAGE_USE_ADVANCED_PADDING):
+            x = tf.pad(x, tf.constant([[0,0],[p, p], [p, p],[0,0]]), "REFLECT")
         result = self.encoder(x)
         if self.tileLatentSpace:
             result = np.tile(result,[1,2,2,1])
@@ -241,6 +244,8 @@ def generatorLoss(fakeOutput, realImages, fakeImages):
             L1 = patchL1(realImages, fakeImages)
             lastL1 = tf.math.reduce_sum(L1)
         else:
+            print(realImages.shape)
+            print(fakeImages.shape)
             L1 = losses.MeanAbsoluteError()(realImages, fakeImages)
             lastL1 = L1
     else:
@@ -282,8 +287,10 @@ def trainStep(realImages, croppedImages):
         discOptimizer.apply_gradients(zip(discGradients, discModel.trainable_variables))
 
 
-def buildBatch(files, batchSize, maxImageWidth):
+def buildBatch(files, batchSize, maxImageWidth, isTrain=False):
     global baseImage
+    global genModel
+    
     if baseImage == None:
         loadImageStack()
     images = None
@@ -294,6 +301,7 @@ def buildBatch(files, batchSize, maxImageWidth):
         size = maxImageWidth
         posX = random.randrange(0, baseImage.shape[1]-size)
         posY = random.randrange(0, baseImage.shape[0]-size)
+        
         cropped = tf.cast(tf.image.crop_to_bounding_box(baseImage, posY, posX, size, size), dtype=tf.float32) / 255.
         images = tf.expand_dims(cropped, axis=0) if images == None else tf.stack([images,cropped])
         
@@ -303,7 +311,13 @@ def buildBatch(files, batchSize, maxImageWidth):
         sy = i.shape[1]//2
         ox = sx // 2
         oy = sy // 2
-        subCrop = tf.cast(tf.image.crop_to_bounding_box(i,ox,oy,sx,sy), dtype=tf.float32) / 255.
+        
+        if genModel is not None:
+            padding = genModel.requiredPadding if (isTrain and IMAGE_USE_ADVANCED_PADDING) else 0
+        else:
+            padding = 0
+            
+        subCrop = tf.cast(tf.image.crop_to_bounding_box(i, ox - padding, oy - padding, sx + 2*padding, sy + 2*padding), dtype=tf.float32) / 255.
         croppedImages = tf.expand_dims(subCrop, axis=0) if croppedImages == None else tf.stack([croppedImages,subCrop])
         
     return images, croppedImages
@@ -392,7 +406,7 @@ def plotLosses(startIndex=0, saveAsPDF=False):
         L1Smooth = [sum(L1[i:i+10])/10.0 for i in range(len(L1)-10)]
         LStyleSmooth = [sum(LStyle[i:i+10])/10.0 for i in range(len(LStyle)-10)]
         
-        figure, axis = plt.subplots(3)
+        figure, axis = plt.subplots(3, figsize=(5,20), dpi=160)
         figure.canvas.manager.set_window_title(currentProjectPath)
         axis[0].plot(iterations[startIndex:],L1[startIndex:], color="blue")
         axis[0].plot(iterations[startIndex:-10],L1Smooth[startIndex:], color="red")
@@ -436,13 +450,13 @@ def copyAllLossPDFs():
         except:
             pass
 
-def asyncLoadBatch(files, batchSize, k):
+def asyncLoadBatch(files, batchSize, k, isTrain=False):
     global batchSem
     global asyncBatchBuffer
     global asyncBatchBufferCropped
     batchSem.acquire()
     #print("ding!")
-    asyncBatchBuffer, asyncBatchBufferCropped = buildBatch(files, batchSize, k * 2)
+    asyncBatchBuffer, asyncBatchBufferCropped = buildBatch(files, batchSize, k * 2, isTrain)
     batchSem.release()
 
 def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEveryXBatches = 100, lossStatsEveryXBatches=100):
@@ -456,9 +470,11 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
     genOptimizer.learning_rate = learningRate
     discOptimizer.learning_rate = learningRate * DISC_LEARNING_FACTOR
     
-    trainStepFunction = tf.function(trainStep, input_signature=(tf.TensorSpec(shape=[batchSize,k*2,k*2,genModel.numTextures*3], dtype=tf.float32),tf.TensorSpec(shape=[batchSize,k,k,genModel.numTextures*3], dtype=tf.float32),))
     
-    threading.Thread(target=asyncLoadBatch, args=(files,batchSize,k,)).start()
+    padding = genModel.requiredPadding if IMAGE_USE_ADVANCED_PADDING else 0
+    trainStepFunction = tf.function(trainStep, input_signature=(tf.TensorSpec(shape=[batchSize,k*2,k*2,genModel.numTextures*3], dtype=tf.float32),tf.TensorSpec(shape=[batchSize,k+2*padding,k+2*padding,genModel.numTextures*3], dtype=tf.float32),))
+    
+    threading.Thread(target=asyncLoadBatch, args=(files,batchSize,k,True,)).start()
     
     startTime = time.time()
     
@@ -475,7 +491,7 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
         batchSem.acquire()
         baseImages = tf.Variable(asyncBatchBuffer)
         croppedImages = tf.Variable(asyncBatchBufferCropped)
-        threading.Thread(target=asyncLoadBatch, args=(files,batchSize,k,)).start()
+        threading.Thread(target=asyncLoadBatch, args=(files,batchSize,k,True,)).start()
         batchSem.release()
         trainStepFunction(baseImages, croppedImages)
         if i%imageEveryXBatches == 0:
@@ -593,7 +609,9 @@ def saveConfiguration():
         
         "FEATUREMAP_INCREASE_FAC" : FEATUREMAP_INCREASE_FAC,
         "FEATUREMAP_MAX_SIZE" : FEATUREMAP_MAX_SIZE,
-        "FEATUREMAP_START_SIZE" : FEATUREMAP_START_SIZE
+        "FEATUREMAP_START_SIZE" : FEATUREMAP_START_SIZE,
+        
+        "IMAGE_USE_ADVANCED_PADDING" : IMAGE_USE_ADVANCED_PADDING
 
         }
     print(configDict)
@@ -621,6 +639,7 @@ def loadConfiguration():
     global FEATUREMAP_INCREASE_FAC
     global FEATUREMAP_MAX_SIZE
     global FEATUREMAP_START_SIZE
+    global IMAGE_USE_ADVANCED_PADDING
     
     configDict = {}
     try:
@@ -658,6 +677,8 @@ def loadConfiguration():
     FEATUREMAP_MAX_SIZE = 8192 if "FEATUREMAP_MAX_SIZE" not in configDict else configDict["FEATUREMAP_MAX_SIZE"]
     FEATUREMAP_START_SIZE = 64 if "FEATUREMAP_START_SIZE" not in configDict else configDict["FEATUREMAP_START_SIZE"]
     
+    IMAGE_USE_ADVANCED_PADDING = True if "IMAGE_USE_ADVANCED_PADDING" not in configDict else configDict["IMAGE_USE_ADVANCED_PADDING"]
+    
     print(configDict)
     
 def defaultConfiguration():
@@ -681,6 +702,7 @@ def defaultConfiguration():
     global FEATUREMAP_INCREASE_FAC
     global FEATUREMAP_MAX_SIZE
     global FEATUREMAP_START_SIZE
+    global IMAGE_USE_ADVANCED_PADDING
     
     
     USE_L1 = True
@@ -708,6 +730,8 @@ def defaultConfiguration():
     FEATUREMAP_START_SIZE = 64
     FEATUREMAP_INCREASE_FAC = 2
     FEATUREMAP_MAX_SIZE = 8192
+    
+    IMAGE_USE_ADVANCED_PADDING = True
 
 def setProject(projectName):
     global baseImage
