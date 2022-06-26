@@ -406,7 +406,7 @@ def plotLosses(startIndex=0, saveAsPDF=False):
         L1Smooth = [sum(L1[i:i+10])/10.0 for i in range(len(L1)-10)]
         LStyleSmooth = [sum(LStyle[i:i+10])/10.0 for i in range(len(LStyle)-10)]
         
-        figure, axis = plt.subplots(3, figsize=(5,20), dpi=160)
+        figure, axis = plt.subplots(3, figsize=(8,10), dpi=80)
         figure.canvas.manager.set_window_title(currentProjectPath)
         axis[0].plot(iterations[startIndex:],L1[startIndex:], color="blue")
         axis[0].plot(iterations[startIndex:-10],L1Smooth[startIndex:], color="red")
@@ -447,6 +447,32 @@ def copyAllLossPDFs():
     for project in os.listdir(currentProjectFolder):
         try:
             shutil.copyfile(currentProjectFolder+project+"/losses.pdf", currentProjectFolder+project+".pdf")
+        except:
+            pass
+        
+def saveAllTileableTextures(inputSize):
+    global currentProjectPath
+    global currentProjectFolder
+    pathBackup = currentProjectPath
+    for project in os.listdir(currentProjectFolder):
+        print(project)
+        setProject(project)
+        try:
+            loadModels()
+            saveTileableTextures(inputSize)
+        except:
+            pass
+    currentProjectPath = pathBackup
+    try:
+        loadModels()
+    except:
+        pass
+    
+def copyAllTileableTextures():
+    global currentProjectFolder
+    for project in os.listdir(currentProjectFolder):
+        try:
+            shutil.copyfile(currentProjectFolder+project+"/output0.png", currentProjectFolder+project+".png")
         except:
             pass
 
@@ -509,8 +535,10 @@ def saveTileableTextures(k, crop=True, filesuffix="", customInput=None):
     else:
         genInput = loadTestImage(k)
         
-    #we assume that the tileable texture has a pretty big input and use the chunked call by default.
-    genOutput = genModel.chunkedCall(genInput)
+    if k > 256:
+        genOutput = genModel.chunkedCall(genInput)
+    else:
+        genOutput = genModel(genInput)
     
     for i in range(genModel.numTextures):
         if crop:
@@ -646,7 +674,8 @@ def loadConfiguration():
         with open(currentProjectPath + "project.conf") as configFile:
             configDict = json.loads(configFile.read())
     except:
-        print("Could not load config from file, reverting to defaults")
+        print(traceback.format_exc())
+        print("Could not load config from file, reverting to defaults -> %s" % (currentProjectPath+currentProjectFolder))
         defaultConfiguration()
 
 
