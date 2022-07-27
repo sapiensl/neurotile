@@ -317,7 +317,8 @@ def buildBatch(files, batchSize, maxImageWidth, isTrain=False):
         else:
             padding = 0
             
-        subCrop = tf.cast(tf.image.crop_to_bounding_box(i, ox - padding, oy - padding, sx + 2*padding, sy + 2*padding), dtype=tf.float32) / 255.
+        subCrop = tf.image.crop_to_bounding_box(i, ox - padding, oy - padding, sx + 2*padding, sy + 2*padding)
+        #subCrop = subCrop + tf.random.uniform(shape=subCrop.shape, minval= 0.0, maxval = 0.025)
         croppedImages = tf.expand_dims(subCrop, axis=0) if croppedImages == None else tf.stack([croppedImages,subCrop])
         
     return images, croppedImages
