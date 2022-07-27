@@ -256,11 +256,15 @@ def generatorLoss(fakeOutput, realImages, fakeImages):
     lastLStyle = 0.0
     if USE_LSTYLE:
         for i in range(genModel.numTextures):
+            lstyleprefactor = 1.0
             for downsamplingI in range(LSTYLE_LAYERS):
                 sampleSize = realImages.shape[1]//(2**downsamplingI)
                 realImg = realImages[:,:,:,i*3:(i+1)*3] if downsamplingI == 0 else tf.image.resize(realImages[:,:,:,i*3:(i+1)*3],(sampleSize, sampleSize))
                 fakeImg = fakeImages[:,:,:,i*3:(i+1)*3] if downsamplingI == 0 else tf.image.resize(fakeImages[:,:,:,i*3:(i+1)*3],(sampleSize, sampleSize))
-                styleLoss += (1/(genModel.numTextures*LSTYLE_LAYERS))*calculateStyleLoss(styleModel, realImg, fakeImg)
+                individualStyleLoss = lstyleprefactor * calculateStyleLoss(styleModel, realImg, fakeImg)
+                styleLoss += (1/(genModel.numTextures*LSTYLE_LAYERS)) * individualStyleLoss
+                lstyleprefactor /= 100.0
+                
         lastLStyle = styleLoss
     #print("%f   -   %f   -   %f" % (dissLoss, likenessLoss, styleLoss))
     return (LAMBDA_LADV * discLoss) + (LAMBDA_L1 * L1) + (LAMBDA_LSTYLE * styleLoss)
@@ -328,8 +332,8 @@ def loadTestImage(k):
     if baseImage == None:
         loadImageStack()
     images = []
-    posX = (baseImage.shape[0] - k)//2
-    posY = (baseImage.shape[1] - k)//2
+    posX = (baseImage.shape[1] - k)//2
+    posY = (baseImage.shape[0] - k)//2
     images.append(tf.image.crop_to_bounding_box(baseImage, posY, posX, k, k))
     
     return tf.convert_to_tensor(images).numpy().astype("float32") / 255.
