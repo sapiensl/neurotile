@@ -48,6 +48,7 @@ USE_PATCH_L1 = False #TODO: might be broken by now, has not been maintained in a
 SILENT = False
 
 NUM_RESIDUAL_BLOCKS = 5
+KERNEL_SIZE_RESIDUAL_BLOCKS = 3
 IMAGE_WIDTH_TRAINING = 128
 IMAGE_WIDTH_TESTING = 256
 IMAGE_USE_ADVANCED_PADDING = True # use the image itself to pad the input (during training) instead of reflection padding
@@ -99,7 +100,7 @@ class TextureGenerator(Model):
         self.residualBlocks = []
         for i in range(NUM_RESIDUAL_BLOCKS):
             newResidualBlock = tf.keras.Sequential([
-            layers.Conv2D(currentFMapSize, (3,3), strides=1, padding="same"),
+            layers.Conv2D(currentFMapSize, (KERNEL_SIZE_RESIDUAL_BLOCKS,KERNEL_SIZE_RESIDUAL_BLOCKS), strides=1, padding="same"),
             tfa.layers.InstanceNormalization(),
             layers.ReLU()
             ])
@@ -126,6 +127,7 @@ class TextureGenerator(Model):
             newDecoder.add(layers.Conv2D(3, (3,3), strides=1, padding="same", activation="sigmoid"))
             self.decoders.append(newDecoder)
         self.tileLatentSpace = False
+        self.tileMirrored = False
         self.numTextures = numTextures
         self.requiredPadding = 2
         for i in range(1,ENCODER_DEPTH):
@@ -140,7 +142,11 @@ class TextureGenerator(Model):
             x = tf.pad(x, tf.constant([[0,0],[p, p], [p, p],[0,0]]), "REFLECT")
         result = self.encoder(x)
         if self.tileLatentSpace:
-            result = np.tile(result,[1,2,2,1])
+            if self.tileMirrored:
+                result = tf.concat([result,tf.reverse(result,axis=[1])],axis=1)
+                result = tf.concat([result,tf.reverse(result,axis=[2])],axis=2)
+            else:
+                result = tf.tile(result,[1,2,2,1])
         for residualBlock in self.residualBlocks:
             result = result + residualBlock(result)#tf.pad(residualBlock(result), tf.constant([[0,0],[1,1],[1,1],[0,0]]))
         concatenatedResult = None
@@ -244,8 +250,8 @@ def generatorLoss(fakeOutput, realImages, fakeImages):
             L1 = patchL1(realImages, fakeImages)
             lastL1 = tf.math.reduce_sum(L1)
         else:
-            print(realImages.shape)
-            print(fakeImages.shape)
+            #print(realImages.shape)
+            #print(fakeImages.shape)
             L1 = losses.MeanAbsoluteError()(realImages, fakeImages)
             lastL1 = L1
     else:
@@ -290,6 +296,11 @@ def trainStep(realImages, croppedImages):
         genOptimizer.apply_gradients(zip(genGradients, genModel.trainable_variables))
         discOptimizer.apply_gradients(zip(discGradients, discModel.trainable_variables))
 
+def getSubImage(x,y,k):
+    images = None
+    cropped = tf.cast(tf.image.crop_to_bounding_box(baseImage, y, x, k, k), dtype=tf.float32) / 255.
+    images = tf.expand_dims(cropped, axis=0) if images == None else tf.stack([images,cropped])
+    return images
 
 def buildBatch(files, batchSize, maxImageWidth, isTrain=False):
     global baseImage
@@ -530,7 +541,7 @@ def train(startI, untilI, learningRate=0.0002, k=IMAGE_WIDTH_TRAINING, imageEver
         if i%lossStatsEveryXBatches == 0:
             logLossValues(i)
 
-def saveTileableTextures(k, crop=True, filesuffix="", customInput=None):
+def saveTileableTextures(k, crop=True, filesuffix="", customInput=None, blockChunkedCall=True):
     global genModel
     
     genModel.tileLatentSpace = True
@@ -540,7 +551,7 @@ def saveTileableTextures(k, crop=True, filesuffix="", customInput=None):
     else:
         genInput = loadTestImage(k)
         
-    if k > 256:
+    if k > 256 and not blockChunkedCall:
         genOutput = genModel.chunkedCall(genInput)
     else:
         genOutput = genModel(genInput)
@@ -554,6 +565,26 @@ def saveTileableTextures(k, crop=True, filesuffix="", customInput=None):
         texture.save(("%soutput%d%s.png" % (currentProjectPath, i, (("_" + filesuffix) if filesuffix else ""))))
     
     genModel.tileLatentSpace = False
+
+@tf.function
+def createTileableTexturesFromInput(genInput, crop=True, blockChunkedCall=True):
+    global genModel
+    
+    genModel.tileLatentSpace = True
+    k = genInput.shape[1]
+        
+    if k > 256 and not blockChunkedCall:
+        genOutput = genModel.chunkedCall(genInput)
+    else:
+        genOutput = genModel(genInput)
+
+    genModel.tileLatentSpace = False    
+    
+    if crop:
+        return genOutput[0,k:3*k,k:3*k,:]
+    else:
+        return genOutput[0,:,:,:]
+    
 
 def saveGeneratorWeights(path):
     global genModel
@@ -633,6 +664,7 @@ def saveConfiguration():
         "SILENT" : SILENT,
 
         "NUM_RESIDUAL_BLOCKS" : NUM_RESIDUAL_BLOCKS,
+        "KERNEL_SIZE_RESIDUAL_BLOCKS" : KERNEL_SIZE_RESIDUAL_BLOCKS,
         "IMAGE_WIDTH_TRAINING" : IMAGE_WIDTH_TRAINING,
         "IMAGE_WIDTH_TESTING" : IMAGE_WIDTH_TESTING,
         "DISC_LEARNING_FACTOR" : DISC_LEARNING_FACTOR,
@@ -673,6 +705,7 @@ def loadConfiguration():
     global FEATUREMAP_MAX_SIZE
     global FEATUREMAP_START_SIZE
     global IMAGE_USE_ADVANCED_PADDING
+    global KERNEL_SIZE_RESIDUAL_BLOCKS
     
     configDict = {}
     try:
@@ -700,6 +733,7 @@ def loadConfiguration():
     SILENT = False if "SILENT" not in configDict else configDict["SILENT"]
 
     NUM_RESIDUAL_BLOCKS = 5 if "NUM_RESIDUAL_BLOCKS" not in configDict else configDict["NUM_RESIDUAL_BLOCKS"]
+    KERNEL_SIZE_RESIDUAL_BLOCKS = 3 if "KERNEL_SIZE_RESIDUAL_BLOCKS" not in configDict else configDict["KERNEL_SIZE_RESIDUAL_BLOCKS"]
     IMAGE_WIDTH_TRAINING = 128 if "IMAGE_WIDTH_TRAINING" not in configDict else configDict["IMAGE_WIDTH_TRAINING"]
     IMAGE_WIDTH_TESTING = 256 if "IMAGE_WIDTH_TESTING" not in configDict else configDict["IMAGE_WIDTH_TESTING"]
     DISC_LEARNING_FACTOR = 1.0 if "DISC_LEARNING_FACTOR" not in configDict else configDict["DISC_LEARNING_FACTOR"]
@@ -737,7 +771,7 @@ def defaultConfiguration():
     global FEATUREMAP_MAX_SIZE
     global FEATUREMAP_START_SIZE
     global IMAGE_USE_ADVANCED_PADDING
-    
+    global KERNEL_SIZE_RESIDUAL_BLOCKS
     
     USE_L1 = True
     USE_LADV = True
@@ -755,6 +789,7 @@ def defaultConfiguration():
     SILENT = False
 
     NUM_RESIDUAL_BLOCKS = 5
+    KERNEL_SIZE_RESIDUAL_BLOCKS = 3
     IMAGE_WIDTH_TRAINING = 128
     IMAGE_WIDTH_TESTING = 256
     DISC_LEARNING_FACTOR = 1.0
@@ -880,7 +915,10 @@ def noiseExperiment(startK=16, iterations=5, makeFinalStack=True):
     global currentProjectPath
     originalPath = currentProjectPath
     currentProjectPath += "fromnoise/"
-    os.mkdir(currentProjectPath)
+    try:
+        os.mkdir(currentProjectPath)
+    except:
+        pass
     inputNoise = tf.random.uniform(shape=(1,startK,startK,genModel.numTextures*3), minval=0.0, maxval=1.0)
     saveImage(inputNoise[0,:,:,:3], ("n%d" % startK))
     output = None
@@ -889,17 +927,18 @@ def noiseExperiment(startK=16, iterations=5, makeFinalStack=True):
         if i == 0:
             output = genModel(inputNoise)
         else:
-            if iterK > 200:
-                output = genModel.chunkedCall(output)
-            else:
-                output = genModel(output)
+#             if iterK > 200:
+#                 output = genModel.chunkedCall(output)
+#             else:
+#                 output = genModel(output)
+            output = genModel(output)
         iterK *= 2
         saveImage(output[0,:,:,:3], ("n%d" % iterK))
     if makeFinalStack:
-        saveTileableTextures(0, True, "_fromnoise", output)
+        saveTileableTextures(0, True, "_fromnoise", output, True)
     currentProjectPath = originalPath
     
-def noiseSweep(k=256):
+def noiseSweep(k=256, percentageStride=1):
     info = tf.Variable(loadTestImage(k))#TODO fix output of loadTestImage to correct type "TF Tensor"
     global currentProjectPath
     originalPath = currentProjectPath
@@ -912,12 +951,12 @@ def noiseSweep(k=256):
 
     noise = tf.random.uniform(shape=(1,k,k,genModel.numTextures*3), minval=0.05, maxval=0.95)
     
-    for i in range(101):
+    for i in range(0,101,percentageStride):
         infoFactor = 1 - (i/100)
         noiseFactor = i/100
         mix = infoFactor * info + noiseFactor * noise
         saveImage(mix[0,:,:,:3], ("mix%d" % i))
-        saveTileableTextures(0, True, ("noise%dpercent" %i), mix)
+        saveTileableTextures(0, True, ("noise%dpercent" %i), mix, True)
     currentProjectPath = originalPath
     
 def lambdaStudy(basename, startAtPermutation=0):
