@@ -299,8 +299,8 @@ def trainStep(realImages, croppedImages):
 def getSubImage(x,y,k):
     images = None
     cropped = tf.cast(tf.image.crop_to_bounding_box(baseImage, y, x, k, k), dtype=tf.float32) / 255.
-    images = tf.expand_dims(cropped, axis=0) if images == None else tf.stack([images,cropped])
-    return images
+    cropped = tf.expand_dims(cropped, axis=0)
+    return cropped
 
 def buildBatch(files, batchSize, maxImageWidth, isTrain=False):
     global baseImage
@@ -566,7 +566,7 @@ def saveTileableTextures(k, crop=True, filesuffix="", customInput=None, blockChu
     
     genModel.tileLatentSpace = False
 
-@tf.function
+#@tf.function
 def createTileableTexturesFromInput(genInput, crop=True, blockChunkedCall=True):
     global genModel
     
@@ -603,10 +603,14 @@ def loadWeights(path):
     global genModel
     global discModel
     
+    print("loading weights from %s" % (path))
+    
     genModel.encoder.load_weights(path+"gen/enc")
     for i, resBlock in enumerate(genModel.residualBlocks):
+        print("Loading resblock %d" % i)
         resBlock.load_weights(path+"gen/res"+str(i))
     for i, decoder in enumerate(genModel.decoders):
+        print("Loading decoder %d" %i)
         decoder.load_weights(path+("gen/dec%d" % i))
     
     discModel.model.load_weights(path+"disc/weights")
@@ -615,6 +619,8 @@ def createModels():
     global genModel
     global discModel
     global baseImage
+    
+    genModel = None
     
     #we need to make sure the input image stack is loaded to be able to tell the number of channels the generator model needs
     if baseImage == None:
@@ -1007,3 +1013,38 @@ files = os.listdir(currentProjectPath+"images")
 setProject("default")
 testImage = loadTestImage(256)
 print("initialized!")
+
+
+
+
+# import upscaler as up
+# setProject("rock512")
+# loadModels()
+# up.createUpscaleModel(baseImage.shape[2])
+# smallImage = tf.expand_dims(tf.image.resize(baseImage, (baseImage.shape[0]//2, baseImage.shape[1]//2)) / 255., axis=0)
+# print(smallImage)
+# 
+# up.trainOnImage(baseImage, 10000, 0.001)
+# upscaledImage = up.upscaleModel(smallImage)
+# upscaledImage = tf.squeeze(upscaledImage)
+# saveImage(upscaledImage[:,:,:3],"upscale01")
+# up.trainOnImage(baseImage, 10000, 0.001)
+# upscaledImage = up.upscaleModel(smallImage)
+# upscaledImage = tf.squeeze(upscaledImage)
+# saveImage(upscaledImage[:,:,:3],"upscale02")
+# up.trainOnImage(baseImage, 10000, 0.001)
+# upscaledImage = up.upscaleModel(smallImage)
+# upscaledImage = tf.squeeze(upscaledImage)
+# saveImage(upscaledImage[:,:,:3],"upscale03")
+# up.trainOnImage(baseImage, 10000, 0.0001)
+# upscaledImage = up.upscaleModel(smallImage)
+# upscaledImage = tf.squeeze(upscaledImage)
+# saveImage(upscaledImage[:,:,:3],"upscale04")
+# up.trainOnImage(baseImage, 10000, 0.0001)
+# upscaledImage = up.upscaleModel(smallImage)
+# upscaledImage = tf.squeeze(upscaledImage)
+# saveImage(upscaledImage[:,:,:3],"upscale05")
+# up.trainOnImage(baseImage, 10000, 0.0001)
+# upscaledImage = up.upscaleModel(smallImage)
+# upscaledImage = tf.squeeze(upscaledImage)
+# saveImage(upscaledImage[:,:,:3],"upscale06")
