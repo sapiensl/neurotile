@@ -294,5 +294,7 @@ def mainWindow():
     tk.Button(root, text="Export", command=main_toExporter).grid(row=0,column=1, sticky=tk.W)
     
     root.mainloop()
-    
-mainWindow()
+
+#for now we instantly move to the exporter since the rest of the gui project is TODO WIP.
+#mainWindow()
+exporter()

@@ -47,6 +47,10 @@ USE_PATCH_L1 = False #TODO: might be broken by now, has not been maintained in a
 
 SILENT = False
 
+FORCE_INPUT_RESOLUTION = False
+USE_UPSCALER = False
+
+
 NUM_RESIDUAL_BLOCKS = 5
 KERNEL_SIZE_RESIDUAL_BLOCKS = 3
 IMAGE_WIDTH_TRAINING = 128
@@ -619,7 +623,10 @@ def createModels():
     global genModel
     global discModel
     global baseImage
+    global testImage
     
+    baseImage = None
+    testImage = None
     genModel = None
     
     #we need to make sure the input image stack is loaded to be able to tell the number of channels the generator model needs
@@ -682,7 +689,9 @@ def saveConfiguration():
         "FEATUREMAP_MAX_SIZE" : FEATUREMAP_MAX_SIZE,
         "FEATUREMAP_START_SIZE" : FEATUREMAP_START_SIZE,
         
-        "IMAGE_USE_ADVANCED_PADDING" : IMAGE_USE_ADVANCED_PADDING
+        "IMAGE_USE_ADVANCED_PADDING" : IMAGE_USE_ADVANCED_PADDING,
+        "FORCE_INPUT_RESOLUTION" : FORCE_INPUT_RESOLUTION,
+        "USE_UPSCALER" : USE_UPSCALER
 
         }
     print(configDict)
@@ -712,6 +721,8 @@ def loadConfiguration():
     global FEATUREMAP_START_SIZE
     global IMAGE_USE_ADVANCED_PADDING
     global KERNEL_SIZE_RESIDUAL_BLOCKS
+    global FORCE_INPUT_RESOLUTION
+    global USE_UPSCALER
     
     configDict = {}
     try:
@@ -752,6 +763,8 @@ def loadConfiguration():
     FEATUREMAP_START_SIZE = 64 if "FEATUREMAP_START_SIZE" not in configDict else configDict["FEATUREMAP_START_SIZE"]
     
     IMAGE_USE_ADVANCED_PADDING = True if "IMAGE_USE_ADVANCED_PADDING" not in configDict else configDict["IMAGE_USE_ADVANCED_PADDING"]
+    FORCE_INPUT_RESOLUTION = False if "FORCE_INPUT_RESOLUTION" not in configDict else configDict["FORCE_INPUT_RESOLUTION"]
+    USE_UPSCALER = False if "USE_UPSCALER" not in configDict else configDict["USE_UPSCALER"]
     
     print(configDict)
     
@@ -778,6 +791,8 @@ def defaultConfiguration():
     global FEATUREMAP_START_SIZE
     global IMAGE_USE_ADVANCED_PADDING
     global KERNEL_SIZE_RESIDUAL_BLOCKS
+    global FORCE_INPUT_RESOLUTION
+    global USE_UPSCALER
     
     USE_L1 = True
     USE_LADV = True
@@ -807,6 +822,66 @@ def defaultConfiguration():
     FEATUREMAP_MAX_SIZE = 8192
     
     IMAGE_USE_ADVANCED_PADDING = True
+    FORCE_INPUT_RESOLUTION = False
+    USE_UPSCALER = False
+
+    
+def optimizedConfiguration():
+    global USE_L1
+    global USE_LADV
+    global USE_LSTYLE
+    global LAMBDA_L1
+    global LAMBDA_LADV
+    global LAMBDA_LSTYLE
+    global LSTYLE_LAYERS
+    global LADV_LAYERS
+    global USE_PATCH_L1
+    global SILENT
+    global NUM_RESIDUAL_BLOCKS
+    global NUM_DECODER_CHUNKS
+    global ENCODER_DEPTH
+    global IMAGE_WIDTH_TESTING
+    global IMAGE_WIDTH_TRAINING
+    global DISC_LEARNING_FACTOR
+    global batchSize
+    global FEATUREMAP_INCREASE_FAC
+    global FEATUREMAP_MAX_SIZE
+    global FEATUREMAP_START_SIZE
+    global IMAGE_USE_ADVANCED_PADDING
+    global KERNEL_SIZE_RESIDUAL_BLOCKS
+    global FORCE_INPUT_RESOLUTION
+    global USE_UPSCALER
+    
+    USE_L1 = True
+    USE_LADV = True
+    USE_LSTYLE = True
+
+    LAMBDA_L1 = 1.0
+    LAMBDA_LADV = 1.0
+    LAMBDA_LSTYLE = 10.0
+    
+    LADV_LAYERS = 1
+    LSTYLE_LAYERS = 2
+
+    USE_PATCH_L1 = False
+
+    SILENT = False
+
+    NUM_RESIDUAL_BLOCKS = 6
+    KERNEL_SIZE_RESIDUAL_BLOCKS = 7
+    IMAGE_WIDTH_TRAINING = 128
+    IMAGE_WIDTH_TESTING = 256
+    DISC_LEARNING_FACTOR = 0.5
+    NUM_DECODER_CHUNKS = 8
+    ENCODER_DEPTH = 2
+    batchSize = 1
+    FEATUREMAP_START_SIZE = 32
+    FEATUREMAP_INCREASE_FAC = 2
+    FEATUREMAP_MAX_SIZE = 8192
+    
+    IMAGE_USE_ADVANCED_PADDING = True
+    FORCE_INPUT_RESOLUTION = True
+    USE_UPSCALER = True
 
 def setProject(projectName):
     global baseImage
@@ -822,26 +897,55 @@ def setProject(projectName):
         pass
     try:
         os.mkdir(currentProjectPath+"images")
-        #TODO: rewrite to not be dependent on these hardcoded textures
-        shutil.copyfile(oldProjectPath + "images/albedo.png", currentProjectPath + "images/albedo.png")
-        shutil.copyfile(oldProjectPath + "images/normal.png", currentProjectPath + "images/normal.png")
+        filesToCopy = os.listdir(oldProjectPath+"images/")
+        for file in filesToCopy:
+            shutil.copyfile(oldProjectPath+"images/"+file, currentProjectPath+"images/"+file)
     except:
         pass
 
 def loadImageStack():
     global baseImage
+    global upscalerImages
+    
     baseImage = None
+    upscalerImages = None
+    
+    size = (-1,-1)
     
     for imgFilename in os.listdir(currentProjectPath+"images/"):
         if os.path.isfile(currentProjectPath+"images/"+imgFilename):
             try:
                 image = PIL.Image.open(currentProjectPath+"images/"+imgFilename)
-                #convert to tensor (?) TODO: check if there is a cleaner option
-                image = tf.image.crop_to_bounding_box(image, 0,0, image.getbbox()[3], image.getbbox()[2])
-                #remove alpha channel
-                image = image[:,:,:3]
-                #add to stack
-                baseImage = image if baseImage == None else tf.concat([baseImage,image], axis=2)
+                upscalerImage = None
+                
+                #rescale to 512px if the configuration says so
+                try:
+                    if FORCE_INPUT_RESOLUTION:
+                        imageSize = image.size
+                        if size == (-1,-1):
+                            size = imageSize
+                        elif imageSize != size:
+                            print("WARNING: input images are of different sizes! input images MUST be exactly the same size for this program to work reliably")
+                        newSizeFactor = 512.0 / min(imageSize)
+                        newSize = tuple(int(newSizeFactor * s) for s in imageSize)
+                        if USE_UPSCALER:
+                            upscalerImage = image.resize(tuple(int(s*2) for s in newSize), PIL.Image.LANCZOS)
+                        image = image.resize(newSize, PIL.Image.LANCZOS)
+                    
+                    
+                    #convert to tensor (?) TODO: check if there is a cleaner option
+                    image = tf.image.crop_to_bounding_box(image, 0,0, image.getbbox()[3], image.getbbox()[2])
+                    #remove alpha channel
+                    image = image[:,:,:3]
+                    #add to stack
+                    baseImage = image if baseImage == None else tf.concat([baseImage,image], axis=2)
+                    
+                    if USE_UPSCALER:
+                        upscalerImage = tf.image.crop_to_bounding_box(upscalerImage, 0,0, upscalerImage.getbbox()[3], upscalerImage.getbbox()[2])
+                        upscalerImage = upscalerImage[:,:,:3]
+                        upscalerImages = upscalerImage if upscalerImages == None else tf.concat([upscalerImages,upscalerImage], axis=2)
+                except:
+                    print("Error while trying to resize and convert the input image %s", imgFilename)
             except:
                 print("Warning: could not load base image with name %s, skipping..." % imgFilename)
     
@@ -867,25 +971,36 @@ def stdLearning(saveFinalTexture=False):
         saveTileableTextures(1024)#TODO: use maximum input texture size instead of hard-coded value
     print("finished training in %d minutes. Bye!" % int((time.time()-sTime)/60))
     
-#experimental method for learning speedup evaluation
-def turboLearning():
+    
+def optimizedLearning():
     sTime = time.time()
+    DISC_LEARNING_FACTOR = 0.5
+    FEATUREMAP_START_SIZE = 32
+    LAMBDA_L1 = 1.0
+    LAMBDA_LADV = 1.0
+    LAMBDA_LSTYLE = 20.0
+    NUM_RESIDUAL_BLOCKS = 6
+    LSTYLE_LAYERS = 3
+    KERNEL_SIZE_RESIDUAL_BLOCKS = 7
+    IMAGE_USE_ADVANCED_PADDING = True
+    
+    tf.keras.backend.clear_session()
     createModels()
-    clearLossLog()
-    tf.keras.backend.clear_session()
-    train(0,500,0.0002,IMAGE_WIDTH_TRAINING,100)
     
-    for i in range(10):
-        trainFactor = 0.001 / (2.0*i+1)
-        print("CURRENT TRAIN FACTOR: %f" % trainFactor)
-        train(500+i*1000, 1500+i*1000, trainFactor, IMAGE_WIDTH_TRAINING, 100)
+    train(0,2000,0.001,192,500,100)
+    LAMBDA_LSTYLE = 10.0
+    LSTYLE_LAYERS = 2
     
-    train(10500,11000,0.00001,IMAGE_WIDTH_TRAINING,100)
-    train(11000,15000,0.000008,IMAGE_WIDTH_TRAINING,100)
+    train(2000,10000,0.001,128,500,100)
+    train(10000,17000,0.0002,128,500,100)
+    train(17000,22000,0.00005,128,500,100)
     saveModels()
-    tf.keras.backend.clear_session()
-    saveTileableTextures(1024)
-    print("finished turbo training in %d minutes. Bye!" % int((time.time()-sTime)/60))
+    train(22000,25000,0.00002,128,500,100)
+    train(25000,26001,0.00001,128,500,100)
+    saveModels()
+    
+    plotLosses(10,True)
+    print("finished optimized training in %d minutes. Bye!" % int((time.time()-sTime)/60))
 
 def ablationTest():
     global USE_L1
@@ -1008,7 +1123,8 @@ def inputTextureSizeStudy(projectNameList):
 
 currentProjectFolder = "projects/"
 currentProjectPath = currentProjectFolder + "default/"
-baseImage = loadImageStack()
+upscalerImages = None
+loadImageStack()
 files = os.listdir(currentProjectPath+"images")
 setProject("default")
 testImage = loadTestImage(256)
