@@ -142,7 +142,7 @@ def inference(x,y,k):
     global inferenceOutput
     inferenceInput = nt.getSubImage(x,y,k)
     inferenceInput = (1.0-noiseScale.get())*inferenceInput + nt.tf.random.uniform(shape=inferenceInput.shape, minval=0.0, maxval=noiseScale.get())
-    inferenceOutput = nt.createTileableTexturesFromInput(inferenceInput)
+    inferenceOutput = nt.createTileableTexturesFromInput(inferenceInput, True, True)
     outputCanvasPhoto = tensorToPhotoImage(inferenceOutput, stackIndex=stackIndex)
     outputCanvasImage = outputCanvas.create_image(256,256, image=outputCanvasPhoto)
     
@@ -184,7 +184,7 @@ def drawInputCanvasImage():
     global inputCanvasImage
     global stackIndex
     inputCanvasPhoto = tensorToPhotoImage(nt.baseImage, mulFactor = 1.0, targetSize=(512,512), saveScaleValues=True, stackIndex=stackIndex)#save scale values in globals
-    inputCanvasImage = inputCanvas.create_image(256, 0, image=inputCanvasPhoto, anchor="n")
+    inputCanvasImage = inputCanvas.create_image(0, 0, image=inputCanvasPhoto, anchor="nw")
 
 def drawInputRegion():
     global inputCanvasRegion

@@ -2,6 +2,7 @@ import tensorflow as tf
 import tensorflow_addons as tfa
 import numpy as np
 import matplotlib.pyplot as plt
+import upscaler as up
 
 from tensorflow.keras import layers, losses, optimizers
 from tensorflow.keras.datasets import mnist
@@ -167,9 +168,16 @@ class TextureGenerator(Model):
             result = np.tile(result,[1,2,2,1])
         for residualBlock in self.residualBlocks:
             result = result + residualBlock(result)#tf.pad(residualBlock(result), tf.constant([[0,0],[1,1],[1,1],[0,0]]))
+            
+            
+        #change padding behaviour temporarily
+        for decoder in self.decoders:
+            for layer in decoder.layers:
+                if "conv2d" in layer.name:
+                    layer.padding = "valid"
         
         chunkSize = result.shape[1]//NUM_DECODER_CHUNKS
-        result = tf.pad(result, tf.constant([[0,0],[5, 5,], [5, 5],[0,0]]), "REFLECT")
+        result = tf.pad(result, tf.constant([[0,0],[5, 5,], [5, 5],[0,0]]), "CONSTANT")
         finalResult = None
         lineResult = None
         for ix in range(NUM_DECODER_CHUNKS):
@@ -188,6 +196,13 @@ class TextureGenerator(Model):
             else:
                 finalResult = tf.concat([finalResult, lineResult], axis=1)
             lineResult = None
+            
+        #return to normal padding behaviour
+        for decoder in self.decoders:
+            for layer in decoder.layers:
+                if "conv2d" in layer.name:
+                    layer.padding = "same"
+            
         return finalResult
     
 class TextureDiscriminator(Model):
@@ -344,8 +359,11 @@ def buildBatch(files, batchSize, maxImageWidth, isTrain=False):
 
 def loadTestImage(k):
     global baseImage
+    
+    #make sure that the base image is loaded prior to crop
     if baseImage == None:
         loadImageStack()
+        
     images = []
     posX = (baseImage.shape[1] - k)//2
     posY = (baseImage.shape[0] - k)//2
@@ -382,7 +400,7 @@ def saveTestImage(index):
     outputImage.paste(pilDisImage, (IMAGE_WIDTH_TESTING * 2, IMAGE_WIDTH_TESTING))
     outputImage.paste(pilDisImage2, (IMAGE_WIDTH_TESTING * 2, IMAGE_WIDTH_TESTING+IMAGE_WIDTH_TESTING//2))
     
-    outputImage.save(currentProjectPath+str(index)+".jpg")
+    outputImage.save(currentProjectPath+str(index)+".png")
     
 def clearLossLog():
     with open(currentProjectPath + "losses.csv", "w") as lossCSV:
@@ -555,14 +573,20 @@ def saveTileableTextures(k, crop=True, filesuffix="", customInput=None, blockChu
     else:
         genInput = loadTestImage(k)
         
-    if k > 256 and not blockChunkedCall:
+    if k > 128 and not blockChunkedCall:
         genOutput = genModel.chunkedCall(genInput)
     else:
         genOutput = genModel(genInput)
+        
+    if USE_UPSCALER:
+        genOutput = up.upscaleModel(genOutput)
     
     for i in range(genModel.numTextures):
         if crop:
-            texture = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,i*3:(i+1)*3].numpy() * 255.0).astype("uint8"))
+            if USE_UPSCALER:
+                texture = PIL.Image.fromarray((genOutput[0,2*k:2*3*k,2*k:2*3*k,i*3:(i+1)*3].numpy() * 255.0).astype("uint8"))
+            else:
+                texture = PIL.Image.fromarray((genOutput[0,k:3*k,k:3*k,i*3:(i+1)*3].numpy() * 255.0).astype("uint8"))
         else:
             texture = PIL.Image.fromarray((genOutput[0,:,:,i*3:(i+1)*3].numpy() * 255.0).astype("uint8"))
         
@@ -577,17 +601,25 @@ def createTileableTexturesFromInput(genInput, crop=True, blockChunkedCall=True):
     genModel.tileLatentSpace = True
     k = genInput.shape[1]
         
-    if k > 256 and not blockChunkedCall:
+    if k > 128 and not blockChunkedCall:
         genOutput = genModel.chunkedCall(genInput)
     else:
         genOutput = genModel(genInput)
 
     genModel.tileLatentSpace = False    
     
+    if USE_UPSCALER:
+        genOutput = up.upscaleModel(genOutput)
+    
     if crop:
-        return genOutput[0,k:3*k,k:3*k,:]
+        if USE_UPSCALER:
+            genOutput = genOutput[0,2*k:2*3*k,2*k:2*3*k,:]
+        else:
+            genOutput = genOutput[0,k:3*k,k:3*k,:]
     else:
-        return genOutput[0,:,:,:]
+        genOutput = genOutput[0,:,:,:]
+        
+    return genOutput
     
 
 def saveGeneratorWeights(path):
@@ -644,6 +676,8 @@ def createModels():
     discModel = TextureDiscriminator(numTextures=numberOfTextures)
         #saveDiscriminatorWeights("")
     #loadWeights("")
+    if USE_UPSCALER:
+        up.createUpscaleModel(baseImage.shape[2])
     
 def loadModels():
     global genModel
@@ -651,6 +685,9 @@ def loadModels():
     loadConfiguration()
     createModels()
     loadWeights(currentProjectPath)
+    if USE_UPSCALER:
+        print("Loading upscaler")
+        up.loadWeights(currentProjectPath)
     
 def saveModels():
     global genModel
@@ -658,6 +695,8 @@ def saveModels():
     saveConfiguration()
     saveGeneratorWeights(currentProjectPath)
     saveDiscriminatorWeights(currentProjectPath)
+    if USE_UPSCALER:
+        up.saveWeights(currentProjectPath)
     
 def saveConfiguration():
     configDict = {
@@ -903,19 +942,21 @@ def setProject(projectName):
     except:
         pass
 
-def loadImageStack():
+def loadImageStack(customImageFolder=None):
     global baseImage
     global upscalerImages
     
     baseImage = None
     upscalerImages = None
     
+    imageFolder = "images/" if customImageFolder is None else (customImageFolder+"/")
+    
     size = (-1,-1)
     
-    for imgFilename in os.listdir(currentProjectPath+"images/"):
-        if os.path.isfile(currentProjectPath+"images/"+imgFilename):
+    for imgFilename in os.listdir(currentProjectPath+imageFolder):
+        if os.path.isfile(currentProjectPath+imageFolder+imgFilename):
             try:
-                image = PIL.Image.open(currentProjectPath+"images/"+imgFilename)
+                image = PIL.Image.open(currentProjectPath+imageFolder+imgFilename)
                 upscalerImage = None
                 
                 #rescale to 512px if the configuration says so
@@ -930,6 +971,9 @@ def loadImageStack():
                         newSize = tuple(int(newSizeFactor * s) for s in imageSize)
                         if USE_UPSCALER:
                             upscalerImage = image.resize(tuple(int(s*2) for s in newSize), PIL.Image.LANCZOS)
+                            upscalerImage = tf.image.crop_to_bounding_box(upscalerImage, 0,0, upscalerImage.getbbox()[3], upscalerImage.getbbox()[2])
+                            upscalerImage = upscalerImage[:,:,:3]
+                            upscalerImages = upscalerImage if upscalerImages == None else tf.concat([upscalerImages,upscalerImage], axis=2)
                         image = image.resize(newSize, PIL.Image.LANCZOS)
                     
                     
@@ -939,11 +983,6 @@ def loadImageStack():
                     image = image[:,:,:3]
                     #add to stack
                     baseImage = image if baseImage == None else tf.concat([baseImage,image], axis=2)
-                    
-                    if USE_UPSCALER:
-                        upscalerImage = tf.image.crop_to_bounding_box(upscalerImage, 0,0, upscalerImage.getbbox()[3], upscalerImage.getbbox()[2])
-                        upscalerImage = upscalerImage[:,:,:3]
-                        upscalerImages = upscalerImage if upscalerImages == None else tf.concat([upscalerImages,upscalerImage], axis=2)
                 except:
                     print("Error while trying to resize and convert the input image %s", imgFilename)
             except:
@@ -952,6 +991,29 @@ def loadImageStack():
     
 def saveImage(inputData, filename):
     PIL.Image.fromarray((inputData.numpy() * 255.0).astype("uint8")).save(currentProjectPath+filename+".png")
+    
+def upscalerTraining():
+    smallImage = loadTestImage(128)
+    print(smallImage)
+    
+    for i in range(10):
+        up.trainOnImage(upscalerImages, 1000, 0.001)
+        upscaledImage = up.upscaleModel(smallImage)
+        upscaledImage = tf.squeeze(upscaledImage)
+        saveImage(upscaledImage[:,:,:3],"upscale"+str(i))
+        
+    for i in range(10,15):
+        up.trainOnImage(upscalerImages, 1000, 0.0005)
+        upscaledImage = up.upscaleModel(smallImage)
+        upscaledImage = tf.squeeze(upscaledImage)
+        saveImage(upscaledImage[:,:,:3],"upscale"+str(i))
+    
+    for i in range(15,25):
+        up.trainOnImage(upscalerImages, 1000, 0.00005)
+        upscaledImage = up.upscaleModel(smallImage)
+        upscaledImage = tf.squeeze(upscaledImage)
+        saveImage(upscaledImage[:,:,:3],"upscale"+str(i))
+        
     
 def stdLearning(saveFinalTexture=False):
     sTime = time.time()
@@ -973,31 +1035,65 @@ def stdLearning(saveFinalTexture=False):
     
     
 def optimizedLearning():
+    global DISC_LEARNING_FACTOR
+    global LAMBDA_L1
+    global LAMBDA_LADV
+    global LAMBDA_LSTYLE
+    global NUM_RESIDUAL_BLOCKS
+    global FEATUREMAP_START_SIZE
+    global LSTYLE_LAYERS
+    global KERNEL_SIZE_RESIDUAL_BLOCKS
+    global IMAGE_USE_ADVANCED_PADDING
+    
     sTime = time.time()
-    DISC_LEARNING_FACTOR = 0.5
+    DISC_LEARNING_FACTOR = 0.25
     FEATUREMAP_START_SIZE = 32
     LAMBDA_L1 = 1.0
     LAMBDA_LADV = 1.0
-    LAMBDA_LSTYLE = 20.0
+    LAMBDA_LSTYLE = 10.0
+#     LAMBDA_LSTYLE = 15.0
     NUM_RESIDUAL_BLOCKS = 6
-    LSTYLE_LAYERS = 3
+#     LSTYLE_LAYERS = 3
+    LSTYLE_LAYERS = 2
+#     KERNEL_SIZE_RESIDUAL_BLOCKS = 5
     KERNEL_SIZE_RESIDUAL_BLOCKS = 7
     IMAGE_USE_ADVANCED_PADDING = True
     
     tf.keras.backend.clear_session()
     createModels()
-    
-    train(0,2000,0.001,192,500,100)
-    LAMBDA_LSTYLE = 10.0
-    LSTYLE_LAYERS = 2
-    
-    train(2000,10000,0.001,128,500,100)
-    train(10000,17000,0.0002,128,500,100)
-    train(17000,22000,0.00005,128,500,100)
     saveModels()
-    train(22000,25000,0.00002,128,500,100)
-    train(25000,26001,0.00001,128,500,100)
+    
+#     train(0,2000,0.001,192,500,100)
+#     LAMBDA_LSTYLE = 10.0
+#     LSTYLE_LAYERS = 2
+#     
+#     train(2000,10000,0.001,128,500,100)
+#     train(10000,17000,0.0002,128,500,100)
+#     train(17000,23000,0.00005,128,500,100)
+#     saveModels()
+#     train(23000,25000,0.00002,128,500,100)
+#     train(25000,26001,0.00001,128,500,100)
+#     saveModels()
+    
+    
+    #train(0,2000,0.0005,192,500,100)
+    ##LAMBDA_LSTYLE = 10.0
+    ##LSTYLE_LAYERS = 2
+    #saveModels()
+    train(0,8000,0.0005,128,500,100)
     saveModels()
+    train(8000,18000,0.0002,128,500,100)
+    saveModels()
+    train(18000,25000,0.00005,128,500,100)
+    saveModels()
+    train(25000,28000,0.00002,128,500,100)
+    saveModels()
+    train(28000,30001,0.00001,128,500,100)
+    saveModels()
+    
+    if USE_UPSCALER:
+        upscalerTraining()
+        saveModels()
     
     plotLosses(10,True)
     print("finished optimized training in %d minutes. Bye!" % int((time.time()-sTime)/60))
@@ -1130,37 +1226,8 @@ setProject("default")
 testImage = loadTestImage(256)
 print("initialized!")
 
-
-
-
-# import upscaler as up
-# setProject("rock512")
-# loadModels()
-# up.createUpscaleModel(baseImage.shape[2])
-# smallImage = tf.expand_dims(tf.image.resize(baseImage, (baseImage.shape[0]//2, baseImage.shape[1]//2)) / 255., axis=0)
-# print(smallImage)
-# 
-# up.trainOnImage(baseImage, 10000, 0.001)
-# upscaledImage = up.upscaleModel(smallImage)
-# upscaledImage = tf.squeeze(upscaledImage)
-# saveImage(upscaledImage[:,:,:3],"upscale01")
-# up.trainOnImage(baseImage, 10000, 0.001)
-# upscaledImage = up.upscaleModel(smallImage)
-# upscaledImage = tf.squeeze(upscaledImage)
-# saveImage(upscaledImage[:,:,:3],"upscale02")
-# up.trainOnImage(baseImage, 10000, 0.001)
-# upscaledImage = up.upscaleModel(smallImage)
-# upscaledImage = tf.squeeze(upscaledImage)
-# saveImage(upscaledImage[:,:,:3],"upscale03")
-# up.trainOnImage(baseImage, 10000, 0.0001)
-# upscaledImage = up.upscaleModel(smallImage)
-# upscaledImage = tf.squeeze(upscaledImage)
-# saveImage(upscaledImage[:,:,:3],"upscale04")
-# up.trainOnImage(baseImage, 10000, 0.0001)
-# upscaledImage = up.upscaleModel(smallImage)
-# upscaledImage = tf.squeeze(upscaledImage)
-# saveImage(upscaledImage[:,:,:3],"upscale05")
-# up.trainOnImage(baseImage, 10000, 0.0001)
-# upscaledImage = up.upscaleModel(smallImage)
-# upscaledImage = tf.squeeze(upscaledImage)
-# saveImage(upscaledImage[:,:,:3],"upscale06")
+# setProject("upscalertest")
+# USE_UPSCALER = True
+# FORCE_INPUT_RESOLUTION = True
+# createModels()
+# upscalerTraining()
